@@ -45,7 +45,7 @@ static const char driver_name[] = "vhci_hcd";
 static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
 int vhci_num_controllers = VHCI_NR_HCS;
-struct vhci *vhcis;
+LIST_HEAD(vhcis_list);
 
 static const char * const bit_desc[] = {
 	"CONNECTION",		/*0*/
@@ -1492,13 +1492,63 @@ static struct platform_driver vhci_driver = {
 	},
 };
 
+static int vhci_register_device(int id)
+{
+	int ret;
+	struct vhci *vhci;
+	vhci = kmalloc(sizeof(struct vhci), GFP_KERNEL);
+	if (vhci  == NULL)
+		return -ENOMEM;
+
+	struct platform_device_info pdevinfo = {
+			.name = driver_name,
+			.id = id,
+			.data = &vhci,
+			.size_data = sizeof(void *),
+		};
+
+	vhci->pdev = platform_device_register_full(&pdevinfo);
+	ret = PTR_ERR_OR_ZERO(vhci->pdev);
+	if (!ret) {
+		list_add_tail(&vhci->list, &vhcis_list);
+	} else {
+		kfree(vhci);
+	}
+	
+	return ret;
+}
+
+struct vhci *vhci_from_id(int id)
+{
+	struct vhci *vhci, *tmp;
+
+	list_for_each_entry_safe(vhci, tmp, &vhcis_list, list) {
+		if (vhci->pdev->id == id) {
+			return vhci;
+		}
+	}
+	pr_warn("Could not find vhci device with ID = %d\n", id);
+	return NULL;
+}
+
+static void vhci_unregister_device(int id)
+{
+	struct vhci *tmp_vhci = vhci_from_id(id);
+
+	if (tmp_vhci == NULL)
+		return;
+
+	list_del(&tmp_vhci->list);
+	platform_device_unregister(tmp_vhci->pdev);
+	kfree(tmp_vhci);
+}
+
 static void del_platform_devices(void)
 {
 	int i;
 
 	for (i = 0; i < vhci_num_controllers; i++) {
-		platform_device_unregister(vhcis[i].pdev);
-		vhcis[i].pdev = NULL;
+		vhci_unregister_device(i);
 	}
 	sysfs_remove_link(&platform_bus.kobj, driver_name);
 }
@@ -1510,31 +1560,15 @@ static int __init vhci_hcd_init(void)
 	if (usb_disabled())
 		return -ENODEV;
 
-	if (vhci_num_controllers < 1)
-		vhci_num_controllers = 1;
-
-	vhcis = kcalloc(vhci_num_controllers, sizeof(struct vhci), GFP_KERNEL);
-	if (vhcis == NULL)
-		return -ENOMEM;
-
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
 		goto err_driver_register;
 
 	for (i = 0; i < vhci_num_controllers; i++) {
-		void *vhci = &vhcis[i];
-		struct platform_device_info pdevinfo = {
-			.name = driver_name,
-			.id = i,
-			.data = &vhci,
-			.size_data = sizeof(void *),
-		};
-
-		vhcis[i].pdev = platform_device_register_full(&pdevinfo);
-		ret = PTR_ERR_OR_ZERO(vhcis[i].pdev);
+		ret = vhci_register_device(i);
 		if (ret < 0) {
 			while (i--)
-				platform_device_unregister(vhcis[i].pdev);
+				vhci_unregister_device(i);
 			goto err_add_hcd;
 		}
 	}
@@ -1544,7 +1578,6 @@ static int __init vhci_hcd_init(void)
 err_add_hcd:
 	platform_driver_unregister(&vhci_driver);
 err_driver_register:
-	kfree(vhcis);
 	return ret;
 }
 
@@ -1552,7 +1585,6 @@ static void __exit vhci_hcd_exit(void)
 {
 	del_platform_devices();
 	platform_driver_unregister(&vhci_driver);
-	kfree(vhcis);
 }
 
 module_init(vhci_hcd_init);

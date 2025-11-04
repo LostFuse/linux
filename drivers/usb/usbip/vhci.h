@@ -97,6 +97,8 @@ struct vhci {
 
 	struct vhci_hcd *vhci_hcd_hs;
 	struct vhci_hcd *vhci_hcd_ss;
+
+	struct list_head list;
 };
 
 /* for usb_hcd.hcd_priv[0] */
@@ -119,11 +121,12 @@ struct vhci_hcd {
 };
 
 extern int vhci_num_controllers;
-extern struct vhci *vhcis;
+extern struct list_head vhcis_list;
 extern struct attribute_group vhci_attr_group;
 
 /* vhci_hcd.c */
 void rh_port_connect(struct vhci_device *vdev, enum usb_device_speed speed);
+struct vhci *vhci_from_id(int id);
 
 /* vhci_sysfs.c */
 int vhci_init_attr_group(void);

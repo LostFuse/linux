@@ -62,7 +62,6 @@ static void port_show_vhci(char **out, int hub, int port, struct vhci_device *vd
 /* Sysfs entry to show port status */
 static ssize_t status_show_vhci(int pdev_nr, char *out)
 {
-	struct platform_device *pdev = vhcis[pdev_nr].pdev;
 	struct vhci *vhci;
 	struct usb_hcd *hcd;
 	struct vhci_hcd *vhci_hcd;
@@ -70,12 +69,14 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 	int i;
 	unsigned long flags;
 
-	if (!pdev || !out) {
+	vhci = vhci_from_id(pdev_nr);
+
+	if (!vhci || !out) {
 		usbip_dbg_vhci_sysfs("show status error\n");
 		return 0;
 	}
 
-	hcd = platform_get_drvdata(pdev);
+	hcd = platform_get_drvdata(vhci->pdev);
 	vhci_hcd = hcd_to_vhci_hcd(hcd);
 	vhci = vhci_hcd->vhci;
 
@@ -219,13 +220,11 @@ static int valid_port(__u32 *pdev_nr, __u32 *rhport)
 		pr_err("pdev %u\n", *pdev_nr);
 		return 0;
 	}
-	*pdev_nr = array_index_nospec(*pdev_nr, vhci_num_controllers);
 
 	if (*rhport >= VHCI_HC_PORTS) {
 		pr_err("rhport %u\n", *rhport);
 		return 0;
 	}
-	*rhport = array_index_nospec(*rhport, VHCI_HC_PORTS);
 
 	return 1;
 }
@@ -236,6 +235,7 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	__u32 port = 0, pdev_nr = 0, rhport = 0;
 	struct usb_hcd *hcd;
 	struct vhci_hcd *vhci_hcd;
+	struct vhci *vhci;
 	int ret;
 
 	if (kstrtoint(buf, 10, &port) < 0)
@@ -247,7 +247,12 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	if (!valid_port(&pdev_nr, &rhport))
 		return -EINVAL;
 
-	hcd = platform_get_drvdata(vhcis[pdev_nr].pdev);
+	vhci = vhci_from_id(pdev_nr);
+	if (vhci == NULL) {
+		dev_err(dev, "port %u not available\n", port);
+	}
+
+	hcd = platform_get_drvdata(vhci->pdev);
 	if (hcd == NULL) {
 		dev_err(dev, "port is not ready %u\n", port);
 		return -EAGAIN;
@@ -341,7 +346,12 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	if (!valid_args(&pdev_nr, &rhport, speed))
 		return -EINVAL;
 
-	hcd = platform_get_drvdata(vhcis[pdev_nr].pdev);
+	vhci = vhci_from_id(pdev_nr);
+	if (vhci == NULL) {
+		dev_err(dev, "port %u not available\n", port);
+	}
+
+	hcd = platform_get_drvdata(vhci->pdev);
 	if (hcd == NULL) {
 		dev_err(dev, "port %d is not ready\n", port);
 		return -EAGAIN;
