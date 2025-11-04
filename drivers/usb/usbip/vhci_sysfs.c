@@ -10,9 +10,6 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
-/* Hardening for Spectre-v1 */
-#include <linux/nospec.h>
-
 #include "usbip_common.h"
 #include "vhci.h"
 
@@ -62,7 +59,6 @@ static void port_show_vhci(char **out, int hub, int port, struct vhci_device *vd
 /* Sysfs entry to show port status */
 static ssize_t status_show_vhci(int pdev_nr, char *out)
 {
-	struct platform_device *pdev = vhcis[pdev_nr].pdev;
 	struct vhci *vhci;
 	struct usb_hcd *hcd;
 	struct vhci_hcd *vhci_hcd;
@@ -70,12 +66,16 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 	int i;
 	unsigned long flags;
 
-	if (!pdev || !out) {
+	mutex_lock(&vhcis_list_mutex);
+
+	vhci = vhci_from_id(pdev_nr);
+
+	if (!vhci || !out) {
 		usbip_dbg_vhci_sysfs("show status error\n");
 		return 0;
 	}
 
-	hcd = platform_get_drvdata(pdev);
+	hcd = platform_get_drvdata(vhci->pdev);
 	vhci_hcd = hcd_to_vhci_hcd(hcd);
 	vhci = vhci_hcd->vhci;
 
@@ -100,6 +100,7 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 	}
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
+	mutex_unlock(&vhcis_list_mutex);
 
 	return out - s;
 }
@@ -171,7 +172,7 @@ static ssize_t nports_show(struct device *dev, struct device_attribute *attr,
 	 * Half the ports are for SPEED_HIGH and half for SPEED_SUPER,
 	 * thus the * 2.
 	 */
-	out += sprintf(out, "%d\n", VHCI_PORTS * vhci_num_controllers);
+	out += sprintf(out, "%d\n", VHCI_PORTS * vhci_get_num_controllers());
 	return out - s;
 }
 static DEVICE_ATTR_RO(nports);
@@ -213,19 +214,12 @@ static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
 	return 0;
 }
 
-static int valid_port(__u32 *pdev_nr, __u32 *rhport)
+static int valid_port(__u32 rhport)
 {
-	if (*pdev_nr >= vhci_num_controllers) {
-		pr_err("pdev %u\n", *pdev_nr);
+	if (rhport >= VHCI_HC_PORTS) {
+		pr_err("rhport %u\n", rhport);
 		return 0;
 	}
-	*pdev_nr = array_index_nospec(*pdev_nr, vhci_num_controllers);
-
-	if (*rhport >= VHCI_HC_PORTS) {
-		pr_err("rhport %u\n", *rhport);
-		return 0;
-	}
-	*rhport = array_index_nospec(*rhport, VHCI_HC_PORTS);
 
 	return 1;
 }
@@ -236,6 +230,7 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	__u32 port = 0, pdev_nr = 0, rhport = 0;
 	struct usb_hcd *hcd;
 	struct vhci_hcd *vhci_hcd;
+	struct vhci *vhci;
 	int ret;
 
 	if (kstrtoint(buf, 10, &port) < 0)
@@ -244,13 +239,22 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	pdev_nr = port_to_pdev_nr(port);
 	rhport = port_to_rhport(port);
 
-	if (!valid_port(&pdev_nr, &rhport))
-		return -EINVAL;
+	mutex_lock(&vhcis_list_mutex);
 
-	hcd = platform_get_drvdata(vhcis[pdev_nr].pdev);
+	if (!valid_port(rhport)) {
+		ret = -EINVAL;
+		goto detach_store_out;
+	}
+
+	vhci = vhci_from_id(pdev_nr);
+	if (vhci == NULL)
+		dev_err(dev, "port %u not available\n", port);
+
+	hcd = platform_get_drvdata(vhci->pdev);
 	if (hcd == NULL) {
 		dev_err(dev, "port is not ready %u\n", port);
-		return -EAGAIN;
+		ret = -EAGAIN;
+		goto detach_store_out;
 	}
 
 	usbip_dbg_vhci_sysfs("rhport %d\n", rhport);
@@ -261,21 +265,26 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 		vhci_hcd = hcd_to_vhci_hcd(hcd)->vhci->vhci_hcd_hs;
 
 	ret = vhci_port_disconnect(vhci_hcd, rhport);
-	if (ret < 0)
-		return -EINVAL;
+	if (ret < 0) {
+		ret = -EINVAL;
+		goto detach_store_out;
+	}
+
 
 	usbip_dbg_vhci_sysfs("Leave\n");
 
+detach_store_out:
+	mutex_unlock(&vhcis_list_mutex);
+	if (ret < 0)
+		return ret;
 	return count;
 }
 static DEVICE_ATTR_WO(detach);
 
-static int valid_args(__u32 *pdev_nr, __u32 *rhport,
-		      enum usb_device_speed speed)
+static int valid_args(__u32 rhport, enum usb_device_speed speed)
 {
-	if (!valid_port(pdev_nr, rhport)) {
+	if (!valid_port(rhport))
 		return 0;
-	}
 
 	switch (speed) {
 	case USB_SPEED_LOW:
@@ -337,14 +346,24 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	usbip_dbg_vhci_sysfs("sockfd(%u) devid(%u) speed(%u)\n",
 			     sockfd, devid, speed);
 
+	mutex_lock(&vhcis_list_mutex);
+
 	/* check received parameters */
-	if (!valid_args(&pdev_nr, &rhport, speed))
+	if (!valid_args(rhport, speed))
 		return -EINVAL;
 
-	hcd = platform_get_drvdata(vhcis[pdev_nr].pdev);
+	vhci = vhci_from_id(pdev_nr);
+	if (vhci == NULL) {
+		dev_err(dev, "port %u not available\n", port);
+		err = -EINVAL;
+		goto attach_store_unlock_vhci_list_mutex;
+	}
+
+	hcd = platform_get_drvdata(vhci->pdev);
 	if (hcd == NULL) {
 		dev_err(dev, "port %d is not ready\n", port);
-		return -EAGAIN;
+		err = -EAGAIN;
+		goto attach_store_unlock_vhci_list_mutex;
 	}
 
 	vhci_hcd = hcd_to_vhci_hcd(hcd);
@@ -362,14 +381,14 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	if (!socket) {
 		dev_err(dev, "failed to lookup sock");
 		err = -EINVAL;
-		goto unlock_mutex;
+		goto attach_store_unlock_sysfs_mutex;
 	}
 	if (socket->type != SOCK_STREAM) {
 		dev_err(dev, "Expecting SOCK_STREAM - found %d",
 			socket->type);
 		sockfd_put(socket);
 		err = -EINVAL;
-		goto unlock_mutex;
+		goto attach_store_unlock_sysfs_mutex;
 	}
 
 	/* create threads before locking */
@@ -377,14 +396,14 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	if (IS_ERR(tcp_rx)) {
 		sockfd_put(socket);
 		err = -EINVAL;
-		goto unlock_mutex;
+		goto attach_store_unlock_sysfs_mutex;
 	}
 	tcp_tx = kthread_create(vhci_tx_loop, &vdev->ud, "vhci_tx");
 	if (IS_ERR(tcp_tx)) {
 		kthread_stop(tcp_rx);
 		sockfd_put(socket);
 		err = -EINVAL;
-		goto unlock_mutex;
+		goto attach_store_unlock_sysfs_mutex;
 	}
 
 	/* get task structs now */
@@ -410,7 +429,7 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 		 * if there's another free port.
 		 */
 		err = -EBUSY;
-		goto unlock_mutex;
+		goto attach_store_unlock_sysfs_mutex;
 	}
 
 	dev_info(dev, "pdev(%u) rhport(%u) sockfd(%d)\n",
@@ -440,89 +459,80 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 
 	mutex_unlock(&vdev->ud.sysfs_lock);
 
+	mutex_unlock(&vhcis_list_mutex);
+
 	return count;
 
-unlock_mutex:
+attach_store_unlock_sysfs_mutex:
 	mutex_unlock(&vdev->ud.sysfs_lock);
+attach_store_unlock_vhci_list_mutex:
+	mutex_unlock(&vhcis_list_mutex);
 	return err;
 }
 static DEVICE_ATTR_WO(attach);
 
-#define MAX_STATUS_NAME 16
-
-struct status_attr {
-	struct device_attribute attr;
-	char name[MAX_STATUS_NAME+1];
-};
-
-static struct status_attr *status_attrs;
-
-static void set_status_attr(int id)
+void vhci_set_status_attr(struct status_attr *status_attr, int id)
 {
-	struct status_attr *status;
-
-	status = status_attrs + id;
 	if (id == 0)
-		strcpy(status->name, "status");
+		strscpy(status_attr->name, "status", sizeof(status_attr->name));
 	else
-		snprintf(status->name, MAX_STATUS_NAME+1, "status.%d", id);
-	status->attr.attr.name = status->name;
-	status->attr.attr.mode = S_IRUGO;
-	status->attr.show = status_show;
-	sysfs_attr_init(&status->attr.attr);
-}
-
-static int init_status_attrs(void)
-{
-	int id;
-
-	status_attrs = kcalloc(vhci_num_controllers, sizeof(struct status_attr),
-			       GFP_KERNEL);
-	if (status_attrs == NULL)
-		return -ENOMEM;
-
-	for (id = 0; id < vhci_num_controllers; id++)
-		set_status_attr(id);
-
-	return 0;
-}
-
-static void finish_status_attrs(void)
-{
-	kfree(status_attrs);
+		snprintf(status_attr->name, MAX_STATUS_NAME+1, "status.%d", id);
+	status_attr->attr.attr.name = status_attr->name;
+	status_attr->attr.attr.mode = 0444;
+	status_attr->attr.show = status_show;
+	sysfs_attr_init(&status_attr->attr.attr);
 }
 
 struct attribute_group vhci_attr_group = {
 	.attrs = NULL,
 };
 
-int vhci_init_attr_group(void)
+int vhci_update_attr_group(void)
 {
 	struct attribute **attrs;
+	struct vhci *vhci;
+	struct usb_hcd *hcd;
 	int ret, i;
 
-	attrs = kcalloc((vhci_num_controllers + 5), sizeof(struct attribute *),
+	vhci_finish_attr_group();
+
+	attrs = kcalloc((vhci_get_num_controllers() + 5), sizeof(struct attribute *),
 			GFP_KERNEL);
 	if (attrs == NULL)
 		return -ENOMEM;
 
-	ret = init_status_attrs();
-	if (ret) {
-		kfree(attrs);
-		return ret;
-	}
 	*attrs = &dev_attr_nports.attr;
 	*(attrs + 1) = &dev_attr_detach.attr;
 	*(attrs + 2) = &dev_attr_attach.attr;
 	*(attrs + 3) = &dev_attr_usbip_debug.attr;
-	for (i = 0; i < vhci_num_controllers; i++)
-		*(attrs + i + 4) = &((status_attrs + i)->attr.attr);
+
+	i = 0;
+	list_for_each_entry(vhci, &vhcis_list, list) {
+		*(attrs + 4 + i++) = &(vhci->status_attr.attr.attr);
+	}
+	*(attrs + 4 + i) = NULL;
+
 	vhci_attr_group.attrs = attrs;
+
+	// Get first controller and add sysfs group to it
+	vhci = vhci_from_id(0);
+	if (vhci) {
+		hcd = platform_get_drvdata(vhci->pdev);
+
+		ret = sysfs_update_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+		if (ret) {
+			pr_err("create sysfs files failed, err = %d\n", ret);
+			vhci_finish_attr_group();
+		}
+		return ret;
+	}
 	return 0;
 }
 
 void vhci_finish_attr_group(void)
 {
-	finish_status_attrs();
-	kfree(vhci_attr_group.attrs);
+	if (vhci_attr_group.attrs != NULL) {
+		kfree(vhci_attr_group.attrs);
+		vhci_attr_group.attrs = NULL;
+	}
 }
