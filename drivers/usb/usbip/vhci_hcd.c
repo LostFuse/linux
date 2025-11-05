@@ -1514,7 +1514,7 @@ static int vhci_register_device(int id)
 	} else {
 		kfree(vhci);
 	}
-	
+
 	return ret;
 }
 
@@ -1553,6 +1553,66 @@ static void del_platform_devices(void)
 	sysfs_remove_link(&platform_bus.kobj, driver_name);
 }
 
+static ssize_t num_controllers_show(struct device_driver *dev, char *out)
+{
+	char *s = out;
+
+	out += sprintf(out, "%d\n", vhci_num_controllers);
+	return out - s;
+}
+
+static ssize_t num_controllers_store(struct device_driver *dev,
+				const char *buf, size_t count)
+{
+	int num;
+	int ret;
+	int new_num_controllers = vhci_num_controllers;
+	struct vhci *primary_vhci;
+	struct usb_hcd *hcd;
+
+	if (kstrtoint(buf, 10, &num) < 0)
+		return -EINVAL;
+
+	if (num < 1) {
+		pr_err("num_controllers_store: invalid number %d, must be >= 1\n", num);
+		return -EINVAL;
+	}
+
+	if (num > new_num_controllers) {
+		while (new_num_controllers < num) {
+			ret = vhci_register_device(new_num_controllers);
+			if (ret < 0) {
+				pr_err("num_controllers_store: could not register controller %d\n", new_num_controllers);
+				break;
+			}
+			new_num_controllers++;
+		}
+	} else if (num < new_num_controllers) {
+		while (new_num_controllers > num) {
+			vhci_unregister_device(--new_num_controllers);
+		}
+	}
+
+	vhci_num_controllers = new_num_controllers;
+
+	primary_vhci = vhci_from_id(0);
+	if (primary_vhci == NULL) {
+		pr_err("num_controllers_store: could not find primary vhci device after change\n");
+		return -ENODEV;
+	}
+	hcd = platform_get_drvdata(primary_vhci->pdev);
+	vhci_stop(hcd);
+	ret = vhci_start(hcd);
+	if (ret < 0) {
+		pr_err("num_controllers_store: could not restart primary vhci_hcd after change\n");
+		return ret;
+	}
+
+	usbip_dbg_vhci_sysfs("num_controllers_store: set number of controllers to %d\n", vhci_num_controllers);
+	return count;
+}
+static DRIVER_ATTR_RW(num_controllers);
+
 static int __init vhci_hcd_init(void)
 {
 	int i, ret;
@@ -1563,6 +1623,9 @@ static int __init vhci_hcd_init(void)
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
 		goto err_driver_register;
+
+	ret = driver_create_file(&vhci_driver.driver,
+				 &driver_attr_num_controllers);
 
 	for (i = 0; i < vhci_num_controllers; i++) {
 		ret = vhci_register_device(i);
