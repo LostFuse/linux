@@ -45,6 +45,7 @@ static const char driver_name[] = "vhci_hcd";
 static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
 int vhci_num_controllers = VHCI_NR_HCS;
+int vhci_hc_ports = VHCI_DEFAULT_HC_PORTS;
 LIST_HEAD(vhcis_list);
 
 static const char * const bit_desc[] = {
@@ -230,7 +231,7 @@ static int vhci_hub_status(struct usb_hcd *hcd, char *buf)
 {
 	struct vhci_hcd	*vhci_hcd = hcd_to_vhci_hcd(hcd);
 	struct vhci *vhci = vhci_hcd->vhci;
-	int		retval = DIV_ROUND_UP(VHCI_HC_PORTS + 1, 8);
+	int		retval = DIV_ROUND_UP(vhci_hc_ports + 1, 8);
 	int		rhport;
 	int		changed = 0;
 	unsigned long	flags;
@@ -244,7 +245,7 @@ static int vhci_hub_status(struct usb_hcd *hcd, char *buf)
 	}
 
 	/* check pseudo status register for each port */
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		if ((vhci_hcd->port_status[rhport] & PORT_C_MASK)) {
 			/* The status of a port has been changed, */
 			usbip_dbg_vhci_rh("port %d status changed\n", rhport);
@@ -291,7 +292,7 @@ ss_hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->bDescLength = 12;
 	desc->wHubCharacteristics = cpu_to_le16(
 		HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_COMMON_OCPM);
-	desc->bNbrPorts = VHCI_HC_PORTS;
+	desc->bNbrPorts = vhci_hc_ports;
 	desc->u.ss.bHubHdrDecLat = 0x04; /* Worst case: 0.4 micro sec*/
 	desc->u.ss.DeviceRemovable = 0xffff;
 }
@@ -305,8 +306,7 @@ static inline void hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->wHubCharacteristics = cpu_to_le16(
 		HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_COMMON_OCPM);
 
-	desc->bNbrPorts = VHCI_HC_PORTS;
-	BUILD_BUG_ON(VHCI_HC_PORTS > USB_MAXCHILDREN);
+	desc->bNbrPorts = vhci_hc_ports;
 	width = desc->bNbrPorts / 8 + 1;
 	desc->bDescLength = USB_DT_HUB_NONVAR_SIZE + 2 * width;
 	memset(&desc->u.hs.DeviceRemovable[0], 0, width);
@@ -323,7 +323,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	unsigned long	flags;
 	bool invalid_rhport = false;
 
-	u32 prev_port_status[VHCI_HC_PORTS];
+	u32 prev_port_status[VHCI_MAX_HC_PORTS];
 
 	if (!HCD_HW_ACCESSIBLE(hcd))
 		return -ETIMEDOUT;
@@ -338,14 +338,14 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 	/*
 	 * wIndex can be 0 for some request types (typeReq). rhport is
-	 * in valid range when wIndex >= 1 and < VHCI_HC_PORTS.
+	 * in valid range when wIndex >= 1 and < vhci_hc_ports.
 	 *
 	 * Reference port_status[] only with valid rhport when
 	 * invalid_rhport is false.
 	 */
-	if (wIndex < 1 || wIndex > VHCI_HC_PORTS) {
+	if (wIndex < 1 || wIndex > vhci_hc_ports) {
 		invalid_rhport = true;
-		if (wIndex > VHCI_HC_PORTS)
+		if (wIndex > vhci_hc_ports)
 			pr_err("invalid port number %d\n", wIndex);
 	} else
 		rhport = wIndex - 1;
@@ -701,7 +701,7 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	struct vhci_device *vdev;
 	unsigned long flags;
 
-	if (portnum > VHCI_HC_PORTS) {
+	if (portnum > vhci_hc_ports) {
 		pr_err("invalid port number %d\n", portnum);
 		return -ENODEV;
 	}
@@ -1182,7 +1182,7 @@ static int vhci_start(struct usb_hcd *hcd)
 
 	/* initialize private data of usb_hcd */
 
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		struct vhci_device *vdev = &vhci_hcd->vdev[rhport];
 
 		vhci_device_init(vdev);
@@ -1238,7 +1238,7 @@ static void vhci_stop(struct usb_hcd *hcd)
 	}
 
 	/* 2. shutdown all the ports of vhci_hcd */
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		struct vhci_device *vdev = &vhci_hcd->vdev[rhport];
 
 		usbip_event_add(&vdev->ud, VDEV_EVENT_REMOVED);
@@ -1435,7 +1435,7 @@ static int vhci_hcd_suspend(struct platform_device *pdev, pm_message_t state)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		if (vhci->vhci_hcd_hs->port_status[rhport] &
 		    USB_PORT_STAT_CONNECTION)
 			connected += 1;
@@ -1561,14 +1561,42 @@ static ssize_t num_controllers_show(struct device_driver *dev, char *out)
 	return out - s;
 }
 
+static int update_sysfs_files(void)
+{
+	int ret;
+	struct vhci *primary_vhci;
+	struct usb_hcd *hcd;
+
+	primary_vhci = vhci_from_id(0);
+	if (primary_vhci == NULL) {
+		pr_err("num_controllers_store: could not find primary vhci device after change\n");
+		return -ENODEV;
+	}
+	hcd = platform_get_drvdata(primary_vhci->pdev);
+
+	sysfs_remove_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+	vhci_finish_attr_group();
+
+	ret = vhci_init_attr_group();
+		if (ret) {
+			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", ret);
+			return ret;
+		}
+	ret = sysfs_create_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+	if (ret) {
+		pr_err("create sysfs files failed, err = %d\n", ret);
+		vhci_finish_attr_group();
+		return ret;
+	}
+	return ret;
+}
+
 static ssize_t num_controllers_store(struct device_driver *dev,
 				const char *buf, size_t count)
 {
 	int num;
 	int ret;
 	int new_num_controllers = vhci_num_controllers;
-	struct vhci *primary_vhci;
-	struct usb_hcd *hcd;
 
 	if (kstrtoint(buf, 10, &num) < 0)
 		return -EINVAL;
@@ -1595,25 +1623,9 @@ static ssize_t num_controllers_store(struct device_driver *dev,
 
 	vhci_num_controllers = new_num_controllers;
 
-	primary_vhci = vhci_from_id(0);
-	if (primary_vhci == NULL) {
-		pr_err("num_controllers_store: could not find primary vhci device after change\n");
-		return -ENODEV;
-	}
-	hcd = platform_get_drvdata(primary_vhci->pdev);
-
-	sysfs_remove_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
-	vhci_finish_attr_group();
-
-	ret = vhci_init_attr_group();
-		if (ret) {
-			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", ret);
-			return ret;
-		}
-	ret = sysfs_create_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
-	if (ret) {
-		pr_err("create sysfs files failed, err = %d\n", ret);
-		vhci_finish_attr_group();
+	ret = update_sysfs_files();
+	if (ret < 0) {
+		pr_err("num_controllers_store: could not update sysfs files after change\n");
 		return ret;
 	}
 
@@ -1621,6 +1633,54 @@ static ssize_t num_controllers_store(struct device_driver *dev,
 	return count;
 }
 static DRIVER_ATTR_RW(num_controllers);
+
+static ssize_t hc_ports_show(struct device_driver *dev, char *buf)
+{
+	char *s = buf;
+
+	buf += sprintf(buf, "%d\n", vhci_hc_ports);
+	return buf - s;
+}
+
+static ssize_t hc_ports_store(struct device_driver *dev,
+				const char *buf, size_t count)
+{
+	int num;
+	int old_num_controllers = vhci_num_controllers;
+	int ret;
+
+	if (kstrtoint(buf, 10, &num) < 0)
+		return -EINVAL;
+
+	if (num < 1) {
+		pr_err("hc_ports_store: invalid number %d, must be >= 1\n", num);
+		return -EINVAL;
+	}
+
+	if (num > vhci_hc_ports) {
+		pr_err("hc_ports_store: invalid number %d, must be <= %d\n", num, VHCI_MAX_HC_PORTS);
+		return -EINVAL;
+	}
+
+	del_platform_devices();
+
+	vhci_num_controllers = 0;
+
+	while (vhci_num_controllers < old_num_controllers) {
+		ret = vhci_register_device(vhci_num_controllers);
+		if (ret < 0) {
+			pr_err("hc_ports_store: could not register controller %d\n", vhci_num_controllers);
+			ret = update_sysfs_files();
+			if (ret < 0) {
+				pr_err("hc_ports_store: could not update sysfs files after change\n");
+			}
+			break;
+		}
+		vhci_num_controllers++;
+	}
+	return count;
+}
+static DRIVER_ATTR_RW(hc_ports);
 
 static int __init vhci_hcd_init(void)
 {
@@ -1633,8 +1693,10 @@ static int __init vhci_hcd_init(void)
 	if (ret)
 		goto err_driver_register;
 
-	ret = driver_create_file(&vhci_driver.driver,
+	driver_create_file(&vhci_driver.driver,
 				 &driver_attr_num_controllers);
+	driver_create_file(&vhci_driver.driver,
+				 &driver_attr_hc_ports);
 
 	for (i = 0; i < vhci_num_controllers; i++) {
 		ret = vhci_register_device(i);
