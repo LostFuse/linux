@@ -1601,14 +1601,23 @@ static ssize_t num_controllers_store(struct device_driver *dev,
 		return -ENODEV;
 	}
 	hcd = platform_get_drvdata(primary_vhci->pdev);
-	vhci_stop(hcd);
-	ret = vhci_start(hcd);
-	if (ret < 0) {
-		pr_err("num_controllers_store: could not restart primary vhci_hcd after change\n");
+
+	sysfs_remove_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+	vhci_finish_attr_group();
+
+	ret = vhci_init_attr_group();
+		if (ret) {
+			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", ret);
+			return ret;
+		}
+	ret = sysfs_create_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+	if (ret) {
+		pr_err("create sysfs files failed, err = %d\n", ret);
+		vhci_finish_attr_group();
 		return ret;
 	}
 
-	usbip_dbg_vhci_sysfs("num_controllers_store: set number of controllers to %d\n", vhci_num_controllers);
+	pr_info("num_controllers_store: set number of controllers to %d\n", vhci_num_controllers);
 	return count;
 }
 static DRIVER_ATTR_RW(num_controllers);
