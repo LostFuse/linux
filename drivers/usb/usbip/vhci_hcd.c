@@ -46,6 +46,7 @@ static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
 LIST_HEAD(vhcis_list);
 DEFINE_MUTEX(vhcis_list_mutex);
+DEFINE_MUTEX(driver_sysfs_mutex);
 
 static const char * const bit_desc[] = {
 	"CONNECTION",		/*0*/
@@ -1563,6 +1564,55 @@ int vhci_get_num_controllers(void)
 	return count;
 }
 
+static ssize_t num_controllers_show(struct device_driver *dev, char *out)
+{
+	char *s = out;
+
+	out += sprintf(out, "%d\n", vhci_get_num_controllers());
+	return out - s;
+}
+
+static ssize_t num_controllers_store(struct device_driver *dev,
+				const char *buf, size_t count)
+{
+	int diff_num_controllers, num_controllers;
+	int num;
+	int ret;
+
+	if (kstrtoint(buf, 10, &num) < 0)
+		return -EINVAL;
+
+	if (num < 1) {
+		pr_err("%s: invalid number %d, must be >= 1\n", __func__, num);
+		return -EINVAL;
+	}
+
+	mutex_lock(&driver_sysfs_mutex);
+	num_controllers = vhci_get_num_controllers();
+	diff_num_controllers = num - num_controllers;
+
+	while (diff_num_controllers) {
+		if (diff_num_controllers > 0) {
+			ret = vhci_register_device(num_controllers);
+			if (ret < 0) {
+				pr_err("%s: could not register controller %d\n", __func__,
+					num_controllers);
+				break;
+			}
+			num_controllers++;
+			diff_num_controllers--;
+		} else {
+			vhci_unregister_device(--num_controllers);
+			diff_num_controllers++;
+		}
+	}
+	pr_info("%s: changed number of controllers to %d\n", __func__, num_controllers);
+
+	mutex_unlock(&driver_sysfs_mutex);
+	return count;
+}
+static DRIVER_ATTR_RW(num_controllers);
+
 static int __init vhci_hcd_init(void)
 {
 	int i, ret;
@@ -1573,6 +1623,12 @@ static int __init vhci_hcd_init(void)
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
 		goto err_driver_register;
+
+	/* Can be accessed from /sys/bus/platform/drivers/vhci_hcd/num_controllers */
+	ret = driver_create_file(&vhci_driver.driver,
+				 &driver_attr_num_controllers);
+	if (ret)
+		goto err_add_hcd;
 
 	for (i = 0; i < VHCI_DEFAULT_NR_HCS; i++) {
 		ret = vhci_register_device(i);
