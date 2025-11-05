@@ -15,6 +15,8 @@
 
 /* TODO: refine locking ?*/
 
+DEFINE_MUTEX(driver_sysfs_mutex);
+
 /*
  * output example:
  * hub port sta spd dev       sockfd local_busid
@@ -536,3 +538,52 @@ void vhci_finish_attr_group(void)
 		vhci_attr_group.attrs = NULL;
 	}
 }
+
+ssize_t num_controllers_show(struct device_driver *dev, char *out)
+{
+	char *s = out;
+
+	out += sprintf(out, "%d\n", vhci_get_num_controllers());
+	return out - s;
+}
+
+ssize_t num_controllers_store(struct device_driver *dev,
+				const char *buf, size_t count)
+{
+	int diff_num_controllers, num_controllers;
+	int num;
+	int ret;
+
+	if (kstrtoint(buf, 10, &num) < 0)
+		return -EINVAL;
+
+	if (num < 1) {
+		pr_err("%s: invalid number %d, must be >= 1\n", __func__, num);
+		return -EINVAL;
+	}
+
+	mutex_lock(&driver_sysfs_mutex);
+	num_controllers = vhci_get_num_controllers();
+	diff_num_controllers = num - num_controllers;
+
+	while (diff_num_controllers) {
+		if (diff_num_controllers > 0) {
+			ret = vhci_register_device(num_controllers);
+			if (ret < 0) {
+				pr_err("%s: could not register controller %d\n", __func__,
+					num_controllers);
+				break;
+			}
+			num_controllers++;
+			diff_num_controllers--;
+		} else {
+			vhci_unregister_device(--num_controllers);
+			diff_num_controllers++;
+		}
+	}
+	pr_info("%s: changed number of controllers to %d\n", __func__, num_controllers);
+
+	mutex_unlock(&driver_sysfs_mutex);
+	return count;
+}
+DRIVER_ATTR_RW(num_controllers);

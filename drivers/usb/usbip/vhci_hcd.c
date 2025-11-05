@@ -1518,7 +1518,7 @@ static struct platform_driver vhci_driver = {
 	},
 };
 
-static int vhci_register_device(int id)
+int vhci_register_device(int id)
 {
 	int ret;
 	struct vhci *vhci;
@@ -1555,7 +1555,7 @@ struct vhci *vhci_from_id(int id)
 	return NULL;
 }
 
-static void vhci_unregister_device(int id)
+void vhci_unregister_device(int id)
 {
 	struct vhci *tmp_vhci = vhci_from_id(id);
 
@@ -1597,6 +1597,12 @@ static int __init vhci_hcd_init(void)
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
 		goto err_driver_register;
+
+	/* Can be accessed from /sys/bus/platform/drivers/vhci_hcd/num_controllers */
+	ret = driver_create_file(&vhci_driver.driver,
+				 &driver_attr_num_controllers);
+	if (ret)
+		goto err_add_hcd;
 
 	for (i = 0; i < VHCI_DEFAULT_NR_HCS; i++) {
 		ret = vhci_register_device(i);

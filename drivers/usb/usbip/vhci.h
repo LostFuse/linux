@@ -132,15 +132,22 @@ extern struct list_head vhcis_list;
 extern struct mutex vhcis_list_mutex;
 extern struct attribute_group vhci_attr_group;
 
+extern struct driver_attribute driver_attr_num_controllers;
+
 /* vhci_hcd.c */
 void rh_port_connect(struct vhci_device *vdev, enum usb_device_speed speed);
 struct vhci *vhci_from_id(int id);
 int vhci_get_num_controllers(void);
+int vhci_register_device(int id);
+void vhci_unregister_device(int id);
 
 /* vhci_sysfs.c */
 void vhci_finish_attr_group(void);
 void vhci_set_status_attr(struct status_attr *status_attr, int id);
 int vhci_update_attr_group(void);
+ssize_t num_controllers_show(struct device_driver *dev, char *out);
+ssize_t num_controllers_store(struct device_driver *dev,
+				const char *buf, size_t count);
 
 /* vhci_rx.c */
 struct urb *pickup_urb_and_free_priv(struct vhci_device *vdev, __u32 seqnum);
