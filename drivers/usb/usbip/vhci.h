@@ -88,6 +88,11 @@ enum hub_speed {
 
 #define MAX_STATUS_NAME 16
 
+struct status_attr {
+	struct device_attribute attr;
+	char name[MAX_STATUS_NAME+1];
+};
+
 struct vhci {
 	spinlock_t lock;
 
@@ -97,6 +102,8 @@ struct vhci {
 	struct vhci_hcd *vhci_hcd_ss;
 
 	struct list_head list;
+
+	struct status_attr status_attr;
 };
 
 /* for usb_hcd.hcd_priv[0] */
@@ -118,8 +125,6 @@ struct vhci_hcd {
 	struct vhci_device vdev[VHCI_MAX_HC_PORTS];
 };
 
-extern int vhci_num_controllers;
-
 extern int vhci_hc_ports;
 /* Each VHCI has 2 hubs (USB2 and USB3), each has vhci_hc_ports ports */
 #define VHCI_PORTS	(vhci_hc_ports*2)
@@ -130,9 +135,11 @@ extern struct attribute_group vhci_attr_group;
 /* vhci_hcd.c */
 void rh_port_connect(struct vhci_device *vdev, enum usb_device_speed speed);
 struct vhci *vhci_from_id(int id);
+int vhci_get_num_controllers(void);
 
 /* vhci_sysfs.c */
-int vhci_init_attr_group(void);
+void vhci_set_status_attr(struct status_attr *status_attr, int id);
+int vhci_update_attr_group(void);
 void vhci_finish_attr_group(void);
 
 /* vhci_rx.c */

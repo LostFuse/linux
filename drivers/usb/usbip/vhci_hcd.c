@@ -44,7 +44,6 @@ static int vhci_get_frame_number(struct usb_hcd *hcd);
 static const char driver_name[] = "vhci_hcd";
 static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
-int vhci_num_controllers = VHCI_NR_HCS;
 int vhci_hc_ports = VHCI_DEFAULT_HC_PORTS;
 LIST_HEAD(vhcis_list);
 
@@ -1172,8 +1171,7 @@ static int vhci_setup(struct usb_hcd *hcd)
 static int vhci_start(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci_hcd = hcd_to_vhci_hcd(hcd);
-	int id, rhport;
-	int err;
+	int rhport;
 
 	usbip_dbg_vhci_hc("enter vhci_start\n");
 
@@ -1197,28 +1195,6 @@ static int vhci_start(struct usb_hcd *hcd)
 #ifdef CONFIG_USB_OTG
 	hcd->self.otg_port = 1;
 #endif
-
-	id = hcd_name_to_id(hcd_name(hcd));
-	if (id < 0) {
-		pr_err("invalid vhci name %s\n", hcd_name(hcd));
-		return -EINVAL;
-	}
-
-	/* vhci_hcd is now ready to be controlled through sysfs */
-	if (id == 0 && usb_hcd_is_primary_hcd(hcd)) {
-		err = vhci_init_attr_group();
-		if (err) {
-			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", err);
-			return err;
-		}
-		err = sysfs_create_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
-		if (err) {
-			dev_err(hcd_dev(hcd), "create sysfs files failed, err = %d\n", err);
-			vhci_finish_attr_group();
-			return err;
-		}
-		pr_info("created sysfs %s\n", hcd_name(hcd));
-	}
 
 	return 0;
 }
@@ -1380,6 +1356,20 @@ static int vhci_hcd_probe(struct platform_device *pdev)
 		goto put_usb3_hcd;
 	}
 
+	vhci->pdev = pdev;
+
+	vhci_set_status_attr(&vhci->status_attr, pdev->id);
+	list_add_tail(&vhci->list, &vhcis_list);
+
+
+	/* vhci_hcd is now ready to be controlled through sysfs */
+	ret = vhci_update_attr_group();
+	if (ret) {
+		pr_err("Update attr group failed, err = %d\n", ret);
+		return ret;
+	}
+	pr_info("Updated sysfs by controller %d\n", pdev->id);
+
 	usbip_dbg_vhci_hc("bye\n");
 	return 0;
 
@@ -1408,6 +1398,9 @@ static void vhci_hcd_remove(struct platform_device *pdev)
 
 	usb_remove_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
 	usb_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
+
+
+	list_del(&vhci->list);
 
 	vhci->vhci_hcd_hs = NULL;
 	vhci->vhci_hcd_ss = NULL;
@@ -1496,6 +1489,8 @@ static int vhci_register_device(int id)
 {
 	int ret;
 	struct vhci *vhci;
+	struct platform_device *pdev;
+
 	vhci = kmalloc(sizeof(struct vhci), GFP_KERNEL);
 	if (vhci  == NULL)
 		return -ENOMEM;
@@ -1507,14 +1502,10 @@ static int vhci_register_device(int id)
 			.size_data = sizeof(void *),
 		};
 
-	vhci->pdev = platform_device_register_full(&pdevinfo);
-	ret = PTR_ERR_OR_ZERO(vhci->pdev);
-	if (!ret) {
-		list_add_tail(&vhci->list, &vhcis_list);
-	} else {
+	pdev = platform_device_register_full(&pdevinfo);
+	ret = PTR_ERR_OR_ZERO(pdev);
+	if (ret)
 		kfree(vhci);
-	}
-
 	return ret;
 }
 
@@ -1537,66 +1528,45 @@ static void vhci_unregister_device(int id)
 
 	if (tmp_vhci == NULL)
 		return;
-
-	list_del(&tmp_vhci->list);
 	platform_device_unregister(tmp_vhci->pdev);
 	kfree(tmp_vhci);
 }
 
 static void del_platform_devices(void)
 {
-	int i;
+	struct vhci *vhci, *tmp;
 
-	for (i = 0; i < vhci_num_controllers; i++) {
-		vhci_unregister_device(i);
+	list_for_each_entry_safe(vhci, tmp, &vhcis_list, list) {
+		vhci_unregister_device(vhci->pdev->id);
 	}
 	sysfs_remove_link(&platform_bus.kobj, driver_name);
+}
+
+int vhci_get_num_controllers(void)
+{
+	struct vhci *vhci;
+	int count = 0;
+
+	list_for_each_entry(vhci, &vhcis_list, list) {
+		count++;
+	}
+	return count;
 }
 
 static ssize_t num_controllers_show(struct device_driver *dev, char *out)
 {
 	char *s = out;
 
-	out += sprintf(out, "%d\n", vhci_num_controllers);
+	out += sprintf(out, "%d\n", vhci_get_num_controllers());
 	return out - s;
-}
-
-static int update_sysfs_files(void)
-{
-	int ret;
-	struct vhci *primary_vhci;
-	struct usb_hcd *hcd;
-
-	primary_vhci = vhci_from_id(0);
-	if (primary_vhci == NULL) {
-		pr_err("num_controllers_store: could not find primary vhci device after change\n");
-		return -ENODEV;
-	}
-	hcd = platform_get_drvdata(primary_vhci->pdev);
-
-	sysfs_remove_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
-	vhci_finish_attr_group();
-
-	ret = vhci_init_attr_group();
-		if (ret) {
-			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", ret);
-			return ret;
-		}
-	ret = sysfs_create_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
-	if (ret) {
-		pr_err("create sysfs files failed, err = %d\n", ret);
-		vhci_finish_attr_group();
-		return ret;
-	}
-	return ret;
 }
 
 static ssize_t num_controllers_store(struct device_driver *dev,
 				const char *buf, size_t count)
 {
+	int diff_num_controllers, num_controllers;
 	int num;
 	int ret;
-	int new_num_controllers = vhci_num_controllers;
 
 	if (kstrtoint(buf, 10, &num) < 0)
 		return -EINVAL;
@@ -1606,30 +1576,25 @@ static ssize_t num_controllers_store(struct device_driver *dev,
 		return -EINVAL;
 	}
 
-	if (num > new_num_controllers) {
-		while (new_num_controllers < num) {
-			ret = vhci_register_device(new_num_controllers);
+	num_controllers = vhci_get_num_controllers();
+	diff_num_controllers = num - num_controllers;
+
+	while(diff_num_controllers) {
+		if (diff_num_controllers > 0) {
+			ret = vhci_register_device(num_controllers);
 			if (ret < 0) {
-				pr_err("num_controllers_store: could not register controller %d\n", new_num_controllers);
+				pr_err("num_controllers_store: could not register controller %d\n", num_controllers);
 				break;
 			}
-			new_num_controllers++;
-		}
-	} else if (num < new_num_controllers) {
-		while (new_num_controllers > num) {
-			vhci_unregister_device(--new_num_controllers);
+			num_controllers++;
+			diff_num_controllers--;
+		} else {
+			vhci_unregister_device(--num_controllers);
+			diff_num_controllers++;
 		}
 	}
 
-	vhci_num_controllers = new_num_controllers;
-
-	ret = update_sysfs_files();
-	if (ret < 0) {
-		pr_err("num_controllers_store: could not update sysfs files after change\n");
-		return ret;
-	}
-
-	pr_info("num_controllers_store: set number of controllers to %d\n", vhci_num_controllers);
+	pr_info("num_controllers_store: changed number of controllers to %d\n", num_controllers);
 	return count;
 }
 static DRIVER_ATTR_RW(num_controllers);
@@ -1646,7 +1611,8 @@ static ssize_t hc_ports_store(struct device_driver *dev,
 				const char *buf, size_t count)
 {
 	int num;
-	int old_num_controllers = vhci_num_controllers;
+	int old_num_controllers = vhci_get_num_controllers();
+	int num_controllers = 0;
 	int ret;
 
 	if (kstrtoint(buf, 10, &num) < 0)
@@ -1657,26 +1623,23 @@ static ssize_t hc_ports_store(struct device_driver *dev,
 		return -EINVAL;
 	}
 
-	if (num > vhci_hc_ports) {
+	if (num > VHCI_MAX_HC_PORTS) {
 		pr_err("hc_ports_store: invalid number %d, must be <= %d\n", num, VHCI_MAX_HC_PORTS);
 		return -EINVAL;
 	}
 
 	del_platform_devices();
 
-	vhci_num_controllers = 0;
+	vhci_hc_ports = num;
+	num_controllers = 0;
 
-	while (vhci_num_controllers < old_num_controllers) {
-		ret = vhci_register_device(vhci_num_controllers);
+	while (num_controllers < old_num_controllers) {
+		ret = vhci_register_device(num_controllers);
 		if (ret < 0) {
-			pr_err("hc_ports_store: could not register controller %d\n", vhci_num_controllers);
-			ret = update_sysfs_files();
-			if (ret < 0) {
-				pr_err("hc_ports_store: could not update sysfs files after change\n");
-			}
+			pr_err("hc_ports_store: could not register controller %d\n", num_controllers);
 			break;
 		}
-		vhci_num_controllers++;
+		num_controllers++;
 	}
 	return count;
 }
@@ -1693,12 +1656,18 @@ static int __init vhci_hcd_init(void)
 	if (ret)
 		goto err_driver_register;
 
-	driver_create_file(&vhci_driver.driver,
+	ret = driver_create_file(&vhci_driver.driver,
 				 &driver_attr_num_controllers);
-	driver_create_file(&vhci_driver.driver,
+	if (ret) {
+		goto err_add_hcd;
+	}
+	ret = driver_create_file(&vhci_driver.driver,
 				 &driver_attr_hc_ports);
+	if (ret) {
+		goto err_add_hcd;
+	}
 
-	for (i = 0; i < vhci_num_controllers; i++) {
+	for (i = 0; i < VHCI_NR_HCS; i++) {
 		ret = vhci_register_device(i);
 		if (ret < 0) {
 			while (i--)

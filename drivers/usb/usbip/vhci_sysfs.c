@@ -172,7 +172,7 @@ static ssize_t nports_show(struct device *dev, struct device_attribute *attr,
 	 * Half the ports are for SPEED_HIGH and half for SPEED_SUPER,
 	 * thus the * 2.
 	 */
-	out += sprintf(out, "%d\n", VHCI_PORTS * vhci_num_controllers);
+	out += sprintf(out, "%d\n", VHCI_PORTS * vhci_get_num_controllers());
 	return out - s;
 }
 static DEVICE_ATTR_RO(nports);
@@ -216,7 +216,7 @@ static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
 
 static int valid_port(__u32 *pdev_nr, __u32 *rhport)
 {
-	if (*pdev_nr >= vhci_num_controllers) {
+	if (!vhci_from_id(*pdev_nr)) {
 		pr_err("pdev %u\n", *pdev_nr);
 		return 0;
 	}
@@ -458,43 +458,18 @@ unlock_mutex:
 }
 static DEVICE_ATTR_WO(attach);
 
-#define MAX_STATUS_NAME 16
-
-struct status_attr {
-	struct device_attribute attr;
-	char name[MAX_STATUS_NAME+1];
-};
-
 static struct status_attr *status_attrs;
 
-static void set_status_attr(int id)
+void vhci_set_status_attr(struct status_attr *status_attr, int id)
 {
-	struct status_attr *status;
-
-	status = status_attrs + id;
 	if (id == 0)
-		strcpy(status->name, "status");
+		strcpy(status_attr->name, "status");
 	else
-		snprintf(status->name, MAX_STATUS_NAME+1, "status.%d", id);
-	status->attr.attr.name = status->name;
-	status->attr.attr.mode = S_IRUGO;
-	status->attr.show = status_show;
-	sysfs_attr_init(&status->attr.attr);
-}
-
-static int init_status_attrs(void)
-{
-	int id;
-
-	status_attrs = kcalloc(vhci_num_controllers, sizeof(struct status_attr),
-			       GFP_KERNEL);
-	if (status_attrs == NULL)
-		return -ENOMEM;
-
-	for (id = 0; id < vhci_num_controllers; id++)
-		set_status_attr(id);
-
-	return 0;
+		snprintf(status_attr->name, MAX_STATUS_NAME+1, "status.%d", id);
+	status_attr->attr.attr.name = status_attr->name;
+	status_attr->attr.attr.mode = S_IRUGO;
+	status_attr->attr.show = status_show;
+	sysfs_attr_init(&status_attr->attr.attr);
 }
 
 static void finish_status_attrs(void)
@@ -506,29 +481,47 @@ struct attribute_group vhci_attr_group = {
 	.attrs = NULL,
 };
 
-int vhci_init_attr_group(void)
+int vhci_update_attr_group(void)
 {
 	struct attribute **attrs;
+	struct vhci *vhci;
+	struct usb_hcd *hcd;
 	int ret, i;
 
-	attrs = kcalloc((vhci_num_controllers + 5), sizeof(struct attribute *),
+	if (vhci_attr_group.attrs != NULL) {
+		kfree(vhci_attr_group.attrs);
+		vhci_attr_group.attrs = NULL;
+	}
+
+	attrs = kcalloc((vhci_get_num_controllers() + 5), sizeof(struct attribute *),
 			GFP_KERNEL);
 	if (attrs == NULL)
 		return -ENOMEM;
 
-	ret = init_status_attrs();
-	if (ret) {
-		kfree(attrs);
-		return ret;
-	}
 	*attrs = &dev_attr_nports.attr;
 	*(attrs + 1) = &dev_attr_detach.attr;
 	*(attrs + 2) = &dev_attr_attach.attr;
 	*(attrs + 3) = &dev_attr_usbip_debug.attr;
-	for (i = 0; i < vhci_num_controllers; i++)
-		*(attrs + i + 4) = &((status_attrs + i)->attr.attr);
+	
+	i = 0;
+	list_for_each_entry(vhci, &vhcis_list, list) {
+		*(attrs + 4 + i++) = &(vhci->status_attr.attr.attr);
+	}
+	
 	vhci_attr_group.attrs = attrs;
-	return 0;
+
+	// Get first controller and add sysfs group to it
+	vhci = vhci_from_id(0);
+
+	hcd = platform_get_drvdata(vhci->pdev);
+
+	ret = sysfs_update_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+	if (ret) {
+		pr_err("create sysfs files failed, err = %d\n", ret);
+		vhci_finish_attr_group();
+		return ret;
+	}
+	return ret;
 }
 
 void vhci_finish_attr_group(void)
