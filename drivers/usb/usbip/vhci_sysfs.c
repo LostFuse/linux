@@ -458,7 +458,6 @@ unlock_mutex:
 }
 static DEVICE_ATTR_WO(attach);
 
-static struct status_attr *status_attrs;
 
 void vhci_set_status_attr(struct status_attr *status_attr, int id)
 {
@@ -472,10 +471,6 @@ void vhci_set_status_attr(struct status_attr *status_attr, int id)
 	sysfs_attr_init(&status_attr->attr.attr);
 }
 
-static void finish_status_attrs(void)
-{
-	kfree(status_attrs);
-}
 
 struct attribute_group vhci_attr_group = {
 	.attrs = NULL,
@@ -526,6 +521,6 @@ int vhci_update_attr_group(void)
 
 void vhci_finish_attr_group(void)
 {
-	finish_status_attrs();
 	kfree(vhci_attr_group.attrs);
+	vhci_attr_group.attrs = NULL;
 }
