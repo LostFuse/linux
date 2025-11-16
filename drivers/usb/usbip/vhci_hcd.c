@@ -1387,6 +1387,7 @@ put_usb2_hcd:
 static void vhci_hcd_remove(struct platform_device *pdev)
 {
 	struct vhci *vhci = *((void **)dev_get_platdata(&pdev->dev));
+	int ret;
 
 	/*
 	 * Disconnects the root hub,
@@ -1399,11 +1400,18 @@ static void vhci_hcd_remove(struct platform_device *pdev)
 	usb_remove_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
 	usb_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
 
-
-	list_del(&vhci->list);
-
 	vhci->vhci_hcd_hs = NULL;
 	vhci->vhci_hcd_ss = NULL;
+
+	list_del(&vhci->list);
+	
+	/* vhci_hcd is now removed from list, thus must be removed from sysfs */
+	ret = vhci_update_attr_group();
+	if (ret) {
+		pr_err("Update attr group failed, err = %d\n", ret);
+		return;
+	}
+	pr_info("Updated sysfs by controller %d\n", pdev->id);
 }
 
 #ifdef CONFIG_PM

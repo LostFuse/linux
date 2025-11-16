@@ -488,6 +488,7 @@ int vhci_update_attr_group(void)
 		vhci_attr_group.attrs = NULL;
 	}
 
+	/* + 5 - to create space for 4 general atrs + 1 for NULL */
 	attrs = kcalloc((vhci_get_num_controllers() + 5), sizeof(struct attribute *),
 			GFP_KERNEL);
 	if (attrs == NULL)
@@ -502,21 +503,24 @@ int vhci_update_attr_group(void)
 	list_for_each_entry(vhci, &vhcis_list, list) {
 		*(attrs + 4 + i++) = &(vhci->status_attr.attr.attr);
 	}
+	*(attrs + 4 + i) = NULL;
 	
 	vhci_attr_group.attrs = attrs;
 
 	// Get first controller and add sysfs group to it
 	vhci = vhci_from_id(0);
-
-	hcd = platform_get_drvdata(vhci->pdev);
-
-	ret = sysfs_update_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
-	if (ret) {
-		pr_err("create sysfs files failed, err = %d\n", ret);
-		vhci_finish_attr_group();
+	if (vhci) {
+		hcd = platform_get_drvdata(vhci->pdev);
+	
+		ret = sysfs_update_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
+		if (ret) {
+			pr_err("create sysfs files failed, err = %d\n", ret);
+			vhci_finish_attr_group();
+		}
 		return ret;
 	}
-	return ret;
+	return 0;
+
 }
 
 void vhci_finish_attr_group(void)
