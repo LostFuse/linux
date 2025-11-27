@@ -587,3 +587,52 @@ ssize_t num_controllers_store(struct device_driver *dev,
 	return count;
 }
 DRIVER_ATTR_RW(num_controllers);
+
+ssize_t hc_ports_show(struct device_driver *dev, char *buf)
+{
+	char *s = buf;
+
+	buf += sprintf(buf, "%d\n", vhci_hc_ports);
+	return buf - s;
+}
+
+ssize_t hc_ports_store(struct device_driver *dev,
+				const char *buf, size_t count)
+{
+	int num;
+	int old_num_controllers = vhci_get_num_controllers();
+	int num_controllers = 0;
+	int ret;
+
+	if (kstrtoint(buf, 10, &num) < 0)
+		return -EINVAL;
+
+	if (num < 1) {
+		pr_err("%s: invalid number %d, must be >= 1\n", __func__, num);
+		return -EINVAL;
+	}
+
+	if (num > VHCI_MAX_HC_PORTS) {
+		pr_err("%s: invalid number %d, must be <= %d\n", __func__, num, VHCI_MAX_HC_PORTS);
+		return -EINVAL;
+	}
+
+	mutex_lock(&driver_sysfs_mutex);
+	del_platform_devices();
+
+	vhci_hc_ports = num;
+	num_controllers = 0;
+
+	while (num_controllers < old_num_controllers) {
+		ret = vhci_register_device(num_controllers);
+		if (ret < 0) {
+			pr_err("%s: could not register controller %d\n", __func__, num_controllers);
+			break;
+		}
+		num_controllers++;
+	}
+	mutex_unlock(&driver_sysfs_mutex);
+	return count;
+}
+
+DRIVER_ATTR_RW(hc_ports);

@@ -1567,7 +1567,7 @@ void vhci_unregister_device(int id)
 	kfree(tmp_vhci);
 }
 
-static void del_platform_devices(void)
+void del_platform_devices(void)
 {
 	struct vhci *vhci, *tmp;
 
@@ -1602,6 +1602,12 @@ static int __init vhci_hcd_init(void)
 	/* Can be accessed from /sys/bus/platform/drivers/vhci_hcd/num_controllers */
 	ret = driver_create_file(&vhci_driver.driver,
 				 &driver_attr_num_controllers);
+	if (ret)
+		goto err_add_hcd;
+
+	/* Can be accessed from /sys/bus/platform/drivers/vhci_hcd/hc_ports */
+	ret = driver_create_file(&vhci_driver.driver,
+				 &driver_attr_hc_ports);
 	if (ret)
 		goto err_add_hcd;
 
