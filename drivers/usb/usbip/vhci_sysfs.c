@@ -84,7 +84,7 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
+	for (i = 0; i < vhci_hc_ports; i++) {
 		struct vhci_device *vdev = &vhci->vhci_hcd_hs->vdev[i];
 
 		spin_lock(&vdev->ud.lock);
@@ -93,12 +93,12 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 		spin_unlock(&vdev->ud.lock);
 	}
 
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
+	for (i = 0; i < vhci_hc_ports; i++) {
 		struct vhci_device *vdev = &vhci->vhci_hcd_ss->vdev[i];
 
 		spin_lock(&vdev->ud.lock);
 		port_show_vhci(&out, HUB_SPEED_SUPER,
-			       pdev_nr * VHCI_PORTS + VHCI_HC_PORTS + i, vdev);
+			       pdev_nr * VHCI_PORTS + vhci_hc_ports + i, vdev);
 		spin_unlock(&vdev->ud.lock);
 	}
 
@@ -113,7 +113,7 @@ static ssize_t status_show_not_ready(int pdev_nr, char *out)
 	char *s = out;
 	int i = 0;
 
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
+	for (i = 0; i < vhci_hc_ports; i++) {
 		out += sprintf(out, "hs  %04u %03u ",
 				    (pdev_nr * VHCI_PORTS) + i,
 				    VDEV_ST_NOTASSIGNED);
@@ -121,9 +121,9 @@ static ssize_t status_show_not_ready(int pdev_nr, char *out)
 		out += sprintf(out, "\n");
 	}
 
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
+	for (i = 0; i < vhci_hc_ports; i++) {
 		out += sprintf(out, "ss  %04u %03u ",
-				    (pdev_nr * VHCI_PORTS) + VHCI_HC_PORTS + i,
+				    (pdev_nr * VHCI_PORTS) + vhci_hc_ports + i,
 				    VDEV_ST_NOTASSIGNED);
 		out += sprintf(out, "000 00000000 0000000000000000 0-0");
 		out += sprintf(out, "\n");
@@ -219,7 +219,7 @@ static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
 
 static int valid_port(__u32 *rhport)
 {
-	if (*rhport >= VHCI_HC_PORTS) {
+	if (*rhport >= vhci_hc_ports) {
 		pr_err("rhport %u\n", *rhport);
 		return 0;
 	}
@@ -262,7 +262,7 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 
 	usbip_dbg_vhci_sysfs("rhport %d\n", rhport);
 
-	if ((port / VHCI_HC_PORTS) % 2)
+	if ((port / vhci_hc_ports) % 2)
 		vhci_hcd = hcd_to_vhci_hcd(hcd)->vhci->vhci_hcd_ss;
 	else
 		vhci_hcd = hcd_to_vhci_hcd(hcd)->vhci->vhci_hcd_hs;

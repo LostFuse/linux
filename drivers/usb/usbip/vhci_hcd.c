@@ -44,6 +44,8 @@ static int vhci_get_frame_number(struct usb_hcd *hcd);
 static const char driver_name[] = "vhci_hcd";
 static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
+int vhci_hc_ports = VHCI_DEFAULT_HC_PORTS;
+
 LIST_HEAD(vhcis_list);
 DEFINE_MUTEX(vhcis_list_mutex);
 DEFINE_MUTEX(driver_sysfs_mutex);
@@ -231,7 +233,7 @@ static int vhci_hub_status(struct usb_hcd *hcd, char *buf)
 {
 	struct vhci_hcd	*vhci_hcd = hcd_to_vhci_hcd(hcd);
 	struct vhci *vhci = vhci_hcd->vhci;
-	int		retval = DIV_ROUND_UP(VHCI_HC_PORTS + 1, 8);
+	int		retval = DIV_ROUND_UP(vhci_hc_ports + 1, 8);
 	int		rhport;
 	int		changed = 0;
 	unsigned long	flags;
@@ -245,7 +247,7 @@ static int vhci_hub_status(struct usb_hcd *hcd, char *buf)
 	}
 
 	/* check pseudo status register for each port */
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		if ((vhci_hcd->port_status[rhport] & PORT_C_MASK)) {
 			/* The status of a port has been changed, */
 			usbip_dbg_vhci_rh("port %d status changed\n", rhport);
@@ -292,7 +294,7 @@ ss_hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->bDescLength = 12;
 	desc->wHubCharacteristics = cpu_to_le16(
 		HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_COMMON_OCPM);
-	desc->bNbrPorts = VHCI_HC_PORTS;
+	desc->bNbrPorts = vhci_hc_ports;
 	desc->u.ss.bHubHdrDecLat = 0x04; /* Worst case: 0.4 micro sec*/
 	desc->u.ss.DeviceRemovable = 0xffff;
 }
@@ -306,8 +308,7 @@ static inline void hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->wHubCharacteristics = cpu_to_le16(
 		HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_COMMON_OCPM);
 
-	desc->bNbrPorts = VHCI_HC_PORTS;
-	BUILD_BUG_ON(VHCI_HC_PORTS > USB_MAXCHILDREN);
+	desc->bNbrPorts = vhci_hc_ports;
 	width = desc->bNbrPorts / 8 + 1;
 	desc->bDescLength = USB_DT_HUB_NONVAR_SIZE + 2 * width;
 	memset(&desc->u.hs.DeviceRemovable[0], 0, width);
@@ -324,7 +325,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	unsigned long	flags;
 	bool invalid_rhport = false;
 
-	u32 prev_port_status[VHCI_HC_PORTS];
+	u32 prev_port_status[VHCI_MAX_HC_PORTS];
 
 	if (!HCD_HW_ACCESSIBLE(hcd))
 		return -ETIMEDOUT;
@@ -339,14 +340,14 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 	/*
 	 * wIndex can be 0 for some request types (typeReq). rhport is
-	 * in valid range when wIndex >= 1 and < VHCI_HC_PORTS.
+	 * in valid range when wIndex >= 1 and < vhci_hc_ports.
 	 *
 	 * Reference port_status[] only with valid rhport when
 	 * invalid_rhport is false.
 	 */
-	if (wIndex < 1 || wIndex > VHCI_HC_PORTS) {
+	if (wIndex < 1 || wIndex > vhci_hc_ports) {
 		invalid_rhport = true;
-		if (wIndex > VHCI_HC_PORTS)
+		if (wIndex > vhci_hc_ports)
 			pr_err("invalid port number %d\n", wIndex);
 	} else
 		rhport = wIndex - 1;
@@ -702,7 +703,7 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	struct vhci_device *vdev;
 	unsigned long flags;
 
-	if (portnum > VHCI_HC_PORTS) {
+	if (portnum > vhci_hc_ports) {
 		pr_err("invalid port number %d\n", portnum);
 		return -ENODEV;
 	}
@@ -1182,7 +1183,7 @@ static int vhci_start(struct usb_hcd *hcd)
 
 	/* initialize private data of usb_hcd */
 
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		struct vhci_device *vdev = &vhci_hcd->vdev[rhport];
 
 		vhci_device_init(vdev);
@@ -1216,7 +1217,7 @@ static void vhci_stop(struct usb_hcd *hcd)
 	}
 
 	/* 2. shutdown all the ports of vhci_hcd */
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		struct vhci_device *vdev = &vhci_hcd->vdev[rhport];
 
 		usbip_event_add(&vdev->ud, VDEV_EVENT_REMOVED);
@@ -1438,7 +1439,7 @@ static int vhci_hcd_suspend(struct platform_device *pdev, pm_message_t state)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		if (vhci->vhci_hcd_hs->port_status[rhport] &
 		    USB_PORT_STAT_CONNECTION)
 			connected += 1;
