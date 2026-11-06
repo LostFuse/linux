@@ -93,8 +93,10 @@ enum hub_speed {
 
 struct vhci {
 	spinlock_t lock;
-	bool ready;
 
+	unsigned int id;
+	bool ready;
+	int probe_error;
 	struct platform_device *pdev;
 
 	struct vhci_hcd *vhci_hcd_hs;
@@ -120,11 +122,19 @@ struct vhci_hcd {
 	struct vhci_device vdev[VHCI_HC_PORTS];
 };
 
-/* Sysfs readers hold this lock while using a controller and its HCDs. */
-extern struct rw_semaphore vhci_registry_lock;
-void vhci_set_ready(struct vhci *vhci, bool ready);
 unsigned int vhci_get_controller_count(void);
+/*
+ * Protects the published pool and controller readiness. Lookup callers must
+ * hold the read lock while using the returned controller or its HCDs, before
+ * taking any per-device sysfs mutex or controller/device spinlock. USB core
+ * callbacks instead rely on the HCD lifetime established by probe/remove.
+ */
+extern struct rw_semaphore vhci_registry_lock;
+extern bool vhci_reconfiguring;
 struct vhci *vhci_get_controller(unsigned int id);
+struct vhci *vhci_get_controller_by_port(u32 port);
+void vhci_set_ready(struct vhci *vhci, bool ready);
+int vhci_get_configuration(unsigned int *controllers, unsigned int *ports);
 int vhci_manager_start(void);
 void vhci_manager_stop(void);
 extern struct attribute_group vhci_attr_group;
@@ -133,7 +143,7 @@ extern struct attribute_group vhci_attr_group;
 void rh_port_connect(struct vhci_device *vdev, enum usb_device_speed speed);
 
 /* vhci_sysfs.c */
-int vhci_init_attr_group(void);
+int vhci_init_attr_group(unsigned int count);
 void vhci_finish_attr_group(void);
 
 /* vhci_rx.c */

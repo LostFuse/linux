@@ -2,11 +2,10 @@
 #include <linux/nospec.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/cleanup.h>
 
 #include "usbip_common.h"
 #include "vhci.h"
-
-DECLARE_RWSEM(vhci_registry_lock);
 
 struct vhci_pool {
 	struct vhci *controllers;
@@ -14,6 +13,8 @@ struct vhci_pool {
 };
 
 static struct vhci_pool *vhci_pool;
+DECLARE_RWSEM(vhci_registry_lock);
+bool vhci_reconfiguring;
 
 unsigned int vhci_get_controller_count(void)
 {
@@ -28,18 +29,60 @@ struct vhci *vhci_get_controller(unsigned int id)
 	return &vhci_pool->controllers[id];
 }
 
-void vhci_manager_stop(void)
+struct vhci *vhci_get_controller_by_port(u32 port)
+{
+	struct vhci *vhci = vhci_get_controller(port / VHCI_PORTS);
+
+	return vhci && vhci->ready ? vhci : NULL;
+}
+
+/*
+ * Probe/remove call this with the platform device lock held. Clearing readiness
+ * drains registry readers before remove tears down the HCDs; probe sets it only
+ * after both HCDs are registered. Platform device registration and removal must
+ * therefore run without the registry lock held.
+ */
+void vhci_set_ready(struct vhci *vhci, bool ready)
+{
+	down_write(&vhci_registry_lock);
+	vhci->ready = ready;
+	up_write(&vhci_registry_lock);
+}
+
+int vhci_get_configuration(unsigned int *controllers, unsigned int *ports)
+{
+	guard(rwsem_read)(&vhci_registry_lock);
+	if (vhci_reconfiguring)
+		return -EAGAIN;
+	*controllers = vhci_get_controller_count();
+	*ports = vhci_pool ? VHCI_HC_PORTS : 0;
+	return 0;
+}
+
+static void release_pool(struct vhci_pool *pool)
 {
 	unsigned int i;
 
-	for (i = 0; i < vhci_pool->count; i++) {
-		platform_device_unregister(vhci_pool->controllers[i].pdev);
-		vhci_pool->controllers[i].pdev = NULL;
+	for (i = 0; i < pool->count; i++) {
+		if (pool->controllers[i].pdev)
+			platform_device_unregister(pool->controllers[i].pdev);
 	}
 	sysfs_remove_link(&platform_bus.kobj, "vhci_hcd");
-	kfree(vhci_pool->controllers);
-	kfree(vhci_pool);
+	kfree(pool->controllers);
+	kfree(pool);
+}
+
+void vhci_manager_stop(void)
+{
+	struct vhci_pool *old;
+
+	down_write(&vhci_registry_lock);
+	old = vhci_pool;
+	vhci_reconfiguring = true;
 	vhci_pool = NULL;
+	up_write(&vhci_registry_lock);
+	if (old)
+		release_pool(old);
 }
 
 int vhci_manager_start(void)
@@ -68,14 +111,21 @@ int vhci_manager_start(void)
 			.size_data = sizeof(void *),
 		};
 
+		controller->id = i;
+		controller->probe_error = -ENODEV;
 		controller->pdev = platform_device_register_full(&pdevinfo);
 		ret = PTR_ERR_OR_ZERO(controller->pdev);
 		if (ret) {
-			while (i)
-				platform_device_unregister(vhci_pool->controllers[--i].pdev);
-			kfree(vhci_pool->controllers);
-			kfree(vhci_pool);
-			vhci_pool = NULL;
+			controller->pdev = NULL;
+			vhci_manager_stop();
+			return ret;
+		}
+		/* Platform registration alone does not imply a successful probe. */
+		device_lock(&controller->pdev->dev);
+		ret = controller->probe_error;
+		device_unlock(&controller->pdev->dev);
+		if (ret) {
+			vhci_manager_stop();
 			return ret;
 		}
 	}

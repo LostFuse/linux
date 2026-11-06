@@ -4,12 +4,13 @@
  * Copyright (C) 2015-2016 Nobuo Iwata
  */
 
-#include <linux/cleanup.h>
 #include <linux/kthread.h>
+#include <linux/cleanup.h>
 #include <linux/file.h>
 #include <linux/net.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 /* Hardening for Spectre-v1 */
 #include <linux/nospec.h>
@@ -60,39 +61,12 @@ static void port_show_vhci(char **out, int hub, int port, struct vhci_device *vd
 	*out += sprintf(*out, "\n");
 }
 
-static ssize_t status_show_not_ready(int pdev_nr, char *out)
-{
-	char *s = out;
-	int i = 0;
-
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
-		out += sprintf(out, "hs  %04u %03u ",
-				    (pdev_nr * VHCI_PORTS) + i,
-				    VDEV_ST_NOTASSIGNED);
-		out += sprintf(out, "000 00000000 0000000000000000 0-0");
-		out += sprintf(out, "\n");
-	}
-
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
-		out += sprintf(out, "ss  %04u %03u ",
-				    (pdev_nr * VHCI_PORTS) + VHCI_HC_PORTS + i,
-				    VDEV_ST_NOTASSIGNED);
-		out += sprintf(out, "000 00000000 0000000000000000 0-0");
-		out += sprintf(out, "\n");
-	}
-	return out - s;
-}
-
 /* Sysfs entry to show port status */
-static ssize_t status_show_vhci(int pdev_nr, char *out)
+static ssize_t status_show_vhci(struct vhci *vhci, char *out)
 {
-	struct vhci *vhci = vhci_get_controller(pdev_nr);
 	char *s = out;
 	int i;
 	unsigned long flags;
-
-	if (!vhci->ready)
-		return status_show_not_ready(pdev_nr, out);
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
@@ -101,7 +75,7 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 
 		spin_lock(&vdev->ud.lock);
 		port_show_vhci(&out, HUB_SPEED_HIGH,
-			       pdev_nr * VHCI_PORTS + i, vdev);
+			       vhci->id * VHCI_PORTS + i, vdev);
 		spin_unlock(&vdev->ud.lock);
 	}
 
@@ -110,7 +84,7 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 
 		spin_lock(&vdev->ud.lock);
 		port_show_vhci(&out, HUB_SPEED_SUPER,
-			       pdev_nr * VHCI_PORTS + VHCI_HC_PORTS + i, vdev);
+			       vhci->id * VHCI_PORTS + VHCI_HC_PORTS + i, vdev);
 		spin_unlock(&vdev->ud.lock);
 	}
 
@@ -119,56 +93,39 @@ static ssize_t status_show_vhci(int pdev_nr, char *out)
 	return out - s;
 }
 
-static int status_name_to_id(const char *name)
+static ssize_t status_show_id(int id, char *out, bool legacy)
 {
-	char *c;
-	long val;
-	int ret;
-
-	c = strchr(name, '.');
-	if (c == NULL)
-		return 0;
-
-	ret = kstrtol(c+1, 10, &val);
-	if (ret < 0)
-		return ret;
-
-	return val;
-}
-
-static ssize_t status_show(struct device *dev,
-			   struct device_attribute *attr, char *out)
-{
+	struct vhci *vhci;
 	char *s = out;
-	int pdev_nr;
 
 	guard(rwsem_read)(&vhci_registry_lock);
-	out += sprintf(out,
-		       "hub port sta spd dev      sockfd local_busid\n");
+	if (vhci_reconfiguring)
+		return -EAGAIN;
+	vhci = vhci_get_controller(id);
+	if (!vhci || (!vhci->ready && !legacy))
+		return -ENODEV;
+	out += sprintf(out, "hub port sta spd dev      sockfd local_busid\n");
+	if (vhci->ready) {
+		out += status_show_vhci(vhci, out);
+	} else {
+		unsigned int i;
 
-	pdev_nr = status_name_to_id(attr->attr.name);
-	if (pdev_nr < 0 || pdev_nr >= vhci_get_controller_count())
-		return -EINVAL;
-	pdev_nr = array_index_nospec(pdev_nr, vhci_get_controller_count());
-	out += status_show_vhci(pdev_nr, out);
-
+		for (i = 0; i < VHCI_PORTS; i++)
+			out += sprintf(out, "%s  %04u %03u 000 00000000 000000 0-0\n",
+				       i < VHCI_HC_PORTS ? "hs" : "ss",
+				       vhci->id * VHCI_PORTS + i, VDEV_ST_NOTASSIGNED);
+	}
 	return out - s;
 }
 
-static ssize_t nports_show(struct device *dev, struct device_attribute *attr,
-			   char *out)
+static ssize_t nports_show_value(char *out)
 {
-	char *s = out;
+	unsigned int controllers, ports;
+	int ret;
 
-	/*
-	 * Half the ports are for SPEED_HIGH and half for SPEED_SUPER,
-	 * thus the * 2.
-	 */
-	out += sprintf(out, "%u\n",
-		       VHCI_PORTS * vhci_get_controller_count());
-	return out - s;
+	ret = vhci_get_configuration(&controllers, &ports);
+	return ret ? ret : sysfs_emit(out, "%u\n", 2 * ports * controllers);
 }
-static DEVICE_ATTR_RO(nports);
 
 /* Sysfs entry to shutdown a virtual connection */
 static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
@@ -207,74 +164,39 @@ static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
 	return 0;
 }
 
-static int valid_port(__u32 *pdev_nr, __u32 *rhport)
+/* The caller holds vhci_registry_lock until the port operation completes. */
+static struct vhci_hcd *resolve_port(u32 port, u32 *rhport)
 {
-	unsigned int count = vhci_get_controller_count();
+	struct vhci *vhci = vhci_get_controller_by_port(port);
+	u32 relative;
 
-	if (*pdev_nr >= count) {
-		pr_err("pdev %u\n", *pdev_nr);
-		return 0;
-	}
-	*pdev_nr = array_index_nospec(*pdev_nr, count);
-
-	if (*rhport >= VHCI_HC_PORTS) {
-		pr_err("rhport %u\n", *rhport);
-		return 0;
-	}
-	*rhport = array_index_nospec(*rhport, VHCI_HC_PORTS);
-
-	return 1;
+	if (!vhci)
+		return NULL;
+	relative = port % VHCI_PORTS;
+	*rhport = array_index_nospec(relative % VHCI_HC_PORTS, VHCI_HC_PORTS);
+	return relative < VHCI_HC_PORTS ? vhci->vhci_hcd_hs : vhci->vhci_hcd_ss;
 }
 
-static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
-			    const char *buf, size_t count)
+static ssize_t vhci_detach(const char *buf, size_t count)
 {
-	__u32 port = 0, pdev_nr = 0, rhport = 0;
-	struct vhci *vhci;
-	struct vhci_hcd *vhci_hcd;
+	u32 port, rhport;
+	struct vhci_hcd *hcd;
 	int ret;
 
 	guard(rwsem_read)(&vhci_registry_lock);
-
-	if (kstrtoint(buf, 10, &port) < 0)
-		return -EINVAL;
-
-	pdev_nr = port_to_pdev_nr(port);
-	rhport = port_to_rhport(port);
-
-	if (!valid_port(&pdev_nr, &rhport))
-		return -EINVAL;
-
-	vhci = vhci_get_controller(pdev_nr);
-	if (!vhci->ready) {
-		dev_err(dev, "port is not ready %u\n", port);
+	if (vhci_reconfiguring)
 		return -EAGAIN;
-	}
-
-	usbip_dbg_vhci_sysfs("rhport %d\n", rhport);
-
-	if ((port / VHCI_HC_PORTS) % 2)
-		vhci_hcd = vhci->vhci_hcd_ss;
-	else
-		vhci_hcd = vhci->vhci_hcd_hs;
-
-	ret = vhci_port_disconnect(vhci_hcd, rhport);
-	if (ret < 0)
+	if (kstrtou32(buf, 10, &port))
 		return -EINVAL;
-
-	usbip_dbg_vhci_sysfs("Leave\n");
-
-	return count;
+	hcd = resolve_port(port, &rhport);
+	if (!hcd)
+		return -EINVAL;
+	ret = vhci_port_disconnect(hcd, rhport);
+	return ret ? ret : count;
 }
-static DEVICE_ATTR_WO(detach);
 
-static int valid_args(__u32 *pdev_nr, __u32 *rhport,
-		      enum usb_device_speed speed)
+static int valid_speed(enum usb_device_speed speed)
 {
-	if (!valid_port(pdev_nr, rhport)) {
-		return 0;
-	}
-
 	switch (speed) {
 	case USB_SPEED_LOW:
 	case USB_SPEED_FULL:
@@ -304,12 +226,14 @@ static int valid_args(__u32 *pdev_nr, __u32 *rhport,
  *
  * write() returns 0 on success, else negative errno.
  */
-static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
-			    const char *buf, size_t count)
+static ssize_t vhci_attach(const char *buf, size_t count)
 {
+	struct device *dev;
 	struct socket *socket;
 	int sockfd = 0;
-	__u32 port = 0, pdev_nr = 0, rhport = 0, devid = 0, speed = 0;
+	__u32 port = 0, rhport = 0, devid = 0, speed = 0;
+	struct vhci_hcd *vhci_hcd;
+	struct vhci_hcd *expected;
 	struct vhci_device *vdev;
 	struct vhci *vhci;
 	int err;
@@ -318,6 +242,8 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	struct task_struct *tcp_tx = NULL;
 
 	guard(rwsem_read)(&vhci_registry_lock);
+	if (vhci_reconfiguring)
+		return -EAGAIN;
 
 	/*
 	 * @rhport: port number of vhci_hcd
@@ -327,28 +253,18 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	 */
 	if (sscanf(buf, "%u %u %u %u", &port, &sockfd, &devid, &speed) != 4)
 		return -EINVAL;
-	pdev_nr = port_to_pdev_nr(port);
-	rhport = port_to_rhport(port);
-
-	usbip_dbg_vhci_sysfs("port(%u) pdev(%d) rhport(%u)\n",
-			     port, pdev_nr, rhport);
-	usbip_dbg_vhci_sysfs("sockfd(%u) devid(%u) speed(%u)\n",
-			     sockfd, devid, speed);
-
-	/* check received parameters */
-	if (!valid_args(&pdev_nr, &rhport, speed))
+	if (!valid_speed(speed))
 		return -EINVAL;
 
-	vhci = vhci_get_controller(pdev_nr);
-	if (!vhci->ready) {
-		dev_err(dev, "port %d is not ready\n", port);
-		return -EAGAIN;
-	}
-
-	if (speed >= USB_SPEED_SUPER)
-		vdev = &vhci->vhci_hcd_ss->vdev[rhport];
-	else
-		vdev = &vhci->vhci_hcd_hs->vdev[rhport];
+	vhci_hcd = resolve_port(port, &rhport);
+	if (!vhci_hcd)
+		return -ENODEV;
+	vhci = vhci_hcd->vhci;
+	dev = &vhci->pdev->dev;
+	expected = speed >= USB_SPEED_SUPER ? vhci->vhci_hcd_ss : vhci->vhci_hcd_hs;
+	if (vhci_hcd != expected)
+		return -EINVAL;
+	vdev = &vhci_hcd->vdev[rhport];
 
 	mutex_lock(&vdev->ud.sysfs_lock);
 
@@ -361,7 +277,7 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	}
 	if (socket->type != SOCK_STREAM) {
 		dev_err(dev, "Expecting SOCK_STREAM - found %d",
-			socket->type);
+		       socket->type);
 		sockfd_put(socket);
 		err = -EINVAL;
 		goto unlock_mutex;
@@ -409,9 +325,9 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	}
 
 	dev_info(dev, "pdev(%u) rhport(%u) sockfd(%d)\n",
-		 pdev_nr, rhport, sockfd);
+		vhci->id, rhport, sockfd);
 	dev_info(dev, "devid(%u) speed(%u) speed_str(%s)\n",
-		 devid, speed, usb_speed_string(speed));
+		devid, speed, usb_speed_string(speed));
 
 	vdev->devid         = devid;
 	vdev->speed         = speed;
@@ -441,84 +357,99 @@ unlock_mutex:
 	mutex_unlock(&vdev->ud.sysfs_lock);
 	return err;
 }
-static DEVICE_ATTR_WO(attach);
 
-#define MAX_STATUS_NAME 16
+/*
+ * Controller-zero controls and status. Keep their wrappers and
+ * registration data together while controller storage changes.
+ */
+static ssize_t nports_dev_show(struct device *dev,
+			       struct device_attribute *attr, char *out)
+{
+	return nports_show_value(out);
+}
+
+static struct device_attribute dev_attr_nports =
+	__ATTR(nports, 0444, nports_dev_show, NULL);
+
+static ssize_t detach_dev_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	return vhci_detach(buf, count);
+}
+
+static struct device_attribute dev_attr_detach =
+	__ATTR(detach, 0200, NULL, detach_dev_store);
+
+static ssize_t attach_dev_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	return vhci_attach(buf, count);
+}
+
+static struct device_attribute dev_attr_attach =
+	__ATTR(attach, 0200, NULL, attach_dev_store);
 
 struct status_attr {
 	struct device_attribute attr;
-	char name[MAX_STATUS_NAME+1];
+	char name[sizeof("status.2147483647")];
+	int id;
 };
 
 static struct status_attr *status_attrs;
 
-static void set_status_attr(int id)
+static ssize_t status_legacy_show(struct device *dev,
+				  struct device_attribute *attr, char *out)
 {
-	struct status_attr *status;
+	struct status_attr *status = container_of(attr, struct status_attr, attr);
 
-	status = status_attrs + id;
-	if (id == 0)
-		strscpy(status->name, "status");
-	else
-		snprintf(status->name, MAX_STATUS_NAME+1, "status.%d", id);
-	status->attr.attr.name = status->name;
-	status->attr.attr.mode = S_IRUGO;
-	status->attr.show = status_show;
-	sysfs_attr_init(&status->attr.attr);
+	return status_show_id(status->id, out, true);
 }
 
-static int init_status_attrs(void)
+struct attribute_group vhci_attr_group;
+
+int vhci_init_attr_group(unsigned int count)
 {
-	unsigned int count = vhci_get_controller_count();
-	unsigned int id;
-
-	status_attrs = kzalloc_objs(struct status_attr, count);
-	if (status_attrs == NULL)
-		return -ENOMEM;
-
-	for (id = 0; id < count; id++)
-		set_status_attr(id);
-
-	return 0;
-}
-
-static void finish_status_attrs(void)
-{
-	kfree(status_attrs);
-}
-
-struct attribute_group vhci_attr_group = {
-	.attrs = NULL,
-};
-
-int vhci_init_attr_group(void)
-{
-	unsigned int count = vhci_get_controller_count();
-	unsigned int i;
 	struct attribute **attrs;
-	int ret;
+	int i;
 
 	attrs = kzalloc_objs(struct attribute *, count + 5);
-	if (attrs == NULL)
+	if (!attrs)
 		return -ENOMEM;
 
-	ret = init_status_attrs();
-	if (ret) {
+	status_attrs = kzalloc_objs(struct status_attr, count);
+	if (!status_attrs) {
 		kfree(attrs);
-		return ret;
+		return -ENOMEM;
 	}
-	*attrs = &dev_attr_nports.attr;
-	*(attrs + 1) = &dev_attr_detach.attr;
-	*(attrs + 2) = &dev_attr_attach.attr;
-	*(attrs + 3) = &dev_attr_usbip_debug.attr;
-	for (i = 0; i < count; i++)
-		*(attrs + i + 4) = &((status_attrs + i)->attr.attr);
+
+	attrs[0] = &dev_attr_nports.attr;
+	attrs[1] = &dev_attr_detach.attr;
+	attrs[2] = &dev_attr_attach.attr;
+	attrs[3] = &dev_attr_usbip_debug.attr;
+	for (i = 0; i < count; i++) {
+		struct status_attr *status = &status_attrs[i];
+
+		status->id = i;
+		if (i)
+			snprintf(status->name, sizeof(status->name), "status.%d", i);
+		else
+			strscpy(status->name, "status");
+		status->attr.attr.name = status->name;
+		status->attr.attr.mode = 0444;
+		status->attr.show = status_legacy_show;
+		sysfs_attr_init(&status->attr.attr);
+		attrs[i + 4] = &status->attr.attr;
+	}
 	vhci_attr_group.attrs = attrs;
 	return 0;
 }
 
 void vhci_finish_attr_group(void)
 {
-	finish_status_attrs();
+	kfree(status_attrs);
 	kfree(vhci_attr_group.attrs);
 }
+
+/* End of the controller-zero interface. */

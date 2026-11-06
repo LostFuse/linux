@@ -44,13 +44,6 @@ static int vhci_get_frame_number(struct usb_hcd *hcd);
 static const char driver_name[] = "vhci_hcd";
 static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
-void vhci_set_ready(struct vhci *vhci, bool ready)
-{
-	down_write(&vhci_registry_lock);
-	vhci->ready = ready;
-	up_write(&vhci_registry_lock);
-}
-
 static const char * const bit_desc[] = {
 	"CONNECTION",		/*0*/
 	"ENABLE",		/*1*/
@@ -1154,23 +1147,6 @@ static void vhci_device_init(struct vhci_device *vdev)
 	usbip_start_eh(&vdev->ud);
 }
 
-static int hcd_name_to_id(const char *name)
-{
-	char *c;
-	long val;
-	int ret;
-
-	c = strchr(name, '.');
-	if (c == NULL)
-		return 0;
-
-	ret = kstrtol(c+1, 10, &val);
-	if (ret < 0)
-		return ret;
-
-	return val;
-}
-
 static int vhci_setup(struct usb_hcd *hcd)
 {
 	struct vhci *vhci = *((void **)dev_get_platdata(hcd->self.controller));
@@ -1202,7 +1178,8 @@ static int vhci_setup(struct usb_hcd *hcd)
 static int vhci_start(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci_hcd = hcd_to_vhci_hcd(hcd);
-	int id, rhport;
+	struct vhci *vhci = vhci_hcd->vhci;
+	int rhport;
 	int err;
 
 	usbip_dbg_vhci_hc("enter vhci_start\n");
@@ -1228,15 +1205,9 @@ static int vhci_start(struct usb_hcd *hcd)
 	hcd->self.otg_port = 1;
 #endif
 
-	id = hcd_name_to_id(hcd_name(hcd));
-	if (id < 0) {
-		dev_err(hcd_dev(hcd), "invalid vhci name %s\n", hcd_name(hcd));
-		return -EINVAL;
-	}
-
-	/* vhci_hcd is now ready to be controlled through sysfs */
-	if (id == 0 && usb_hcd_is_primary_hcd(hcd)) {
-		err = vhci_init_attr_group();
+	/* Legacy userland controls remain on controller zero. */
+	if (vhci->id == 0 && usb_hcd_is_primary_hcd(hcd)) {
+		err = vhci_init_attr_group(vhci_get_controller_count());
 		if (err) {
 			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", err);
 			return err;
@@ -1256,13 +1227,13 @@ static int vhci_start(struct usb_hcd *hcd)
 static void vhci_stop(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci_hcd = hcd_to_vhci_hcd(hcd);
-	int id, rhport;
+	struct vhci *vhci = vhci_hcd->vhci;
+	int rhport;
 
 	usbip_dbg_vhci_hc("stop VHCI controller\n");
 
 	/* 1. remove the userland interface of vhci_hcd */
-	id = hcd_name_to_id(hcd_name(hcd));
-	if (id == 0 && usb_hcd_is_primary_hcd(hcd)) {
+	if (vhci->id == 0 && usb_hcd_is_primary_hcd(hcd)) {
 		sysfs_remove_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
 		vhci_finish_attr_group();
 	}
@@ -1375,13 +1346,18 @@ static int vhci_hcd_probe(struct platform_device *pdev)
 
 	usbip_dbg_vhci_hc("name %s id %d\n", pdev->name, pdev->id);
 
+	/* Publish the device pointer before making the controller ready. */
+	vhci->pdev = pdev;
+
 	/*
 	 * Allocate and initialize hcd.
 	 * Our private data is also allocated automatically.
 	 */
 	hcd_hs = usb_create_hcd(&vhci_hc_driver, &pdev->dev, dev_name(&pdev->dev));
-	if (!hcd_hs)
+	if (!hcd_hs) {
+		vhci->probe_error = -ENOMEM;
 		return dev_err_probe(&pdev->dev, -ENOMEM, "create primary hcd failed\n");
+	}
 
 	hcd_hs->has_tt = 1;
 
@@ -1409,6 +1385,7 @@ static int vhci_hcd_probe(struct platform_device *pdev)
 	}
 
 	usbip_dbg_vhci_hc("bye\n");
+	vhci->probe_error = 0;
 	vhci_set_ready(vhci, true);
 	return 0;
 
@@ -1420,6 +1397,7 @@ put_usb2_hcd:
 	usb_put_hcd(hcd_hs);
 	vhci->vhci_hcd_hs = NULL;
 	vhci->vhci_hcd_ss = NULL;
+	vhci->probe_error = ret;
 	return ret;
 }
 
