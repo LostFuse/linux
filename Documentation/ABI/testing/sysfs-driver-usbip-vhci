@@ -41,6 +41,41 @@ Description:
 		is already idle. EAGAIN indicates pool replacement in progress.
 		Controller zero retains detach with the same behavior.
 
+What:		/sys/bus/platform/drivers/vhci_hcd/configuration
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Read two decimal numbers: the controller count and ports per hub.
+		Each controller has high-speed and super-speed hubs with the
+		same port count. Initial values come from Kconfig.
+
+		Write both numbers together to replace the complete idle pool.
+		Port counts from 1 through 15 are accepted. Controller IDs
+		and the total port count must fit in a signed int. There is no
+		independent VHCI controller limit; USB core's bus-number ceiling
+		bounds preparation. Counts above 31 return E2BIG before allocation
+		or teardown with the current USB core limit. Other host controllers
+		can reduce available capacity further. Successful pools have
+		controller zero. Writing the current values is a no-op.
+		Every successful configuration has at least one controller.
+		Writing "0 0" is invalid; that value is only a recovery report.
+		The mode is 0644: reading is public and writing requires root.
+
+		EBUSY rejects changes while a port is attached, attaching, or
+		disconnecting. EINVAL rejects invalid formats or dimensions.
+		Replacement memory is prepared before removing the old pool,
+		without registering USB buses. A preparation error preserves
+		the old pool. A registration error removes partial replacements
+		and attempts to restore the previous geometry and each controller's
+		bound or unbound state. A successful replacement binds every new
+		controller. Restoration does not preserve USB bus numbers or
+		per-device settings such as driver overrides. Restoration
+		is best effort; if it also fails, the pool is empty and reads
+		return "0 0". The driver remains available for another request.
+		During replacement, configuration, nports, status, attach and
+		detach return EAGAIN. Controller IDs and ports are renumbered
+		from zero after successful replacement.
+
 What:		/sys/devices/platform/vhci_hcd.N/status
 Date:		November 2026
 Contact:	Jakub Lecki <lec.jakub@gmail.com>

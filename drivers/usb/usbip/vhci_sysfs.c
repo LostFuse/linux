@@ -138,6 +138,38 @@ static ssize_t num_ports_show(struct device *dev,
 }
 DEVICE_ATTR_RO(num_ports);
 
+static ssize_t configuration_show(struct device_driver *driver, char *buf)
+{
+	unsigned int controllers, ports;
+	int ret;
+
+	ret = vhci_get_configuration(&controllers, &ports);
+	return ret ? ret : sysfs_emit(buf, "%u %u\n", controllers, ports);
+}
+
+static ssize_t configuration_store(struct device_driver *driver,
+				   const char *buf, size_t count)
+{
+	unsigned int controllers, ports;
+	char **args;
+	int argc, ret;
+
+	args = argv_split(GFP_KERNEL, buf, &argc);
+	if (!args)
+		return -ENOMEM;
+	ret = -EINVAL;
+	if (argc == 2) {
+		ret = kstrtouint(args[0], 10, &controllers);
+		if (!ret)
+			ret = kstrtouint(args[1], 10, &ports);
+		if (!ret)
+			ret = vhci_configure(controllers, ports);
+	}
+	argv_free(args);
+	return ret ? ret : count;
+}
+DRIVER_ATTR_RW(configuration);
+
 static ssize_t nports_show_value(char *out)
 {
 	unsigned int controllers, ports;

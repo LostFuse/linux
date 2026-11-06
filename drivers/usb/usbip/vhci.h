@@ -125,7 +125,12 @@ struct vhci_hcd {
 };
 
 unsigned int vhci_get_controller_count(void);
-/* Shared geometry stays fixed until all HCDs using it have been removed. */
+/*
+ * Controller count and ports per hub are shared by all HCDs. Registration
+ * sets them before starting any HCD; replacement changes them only after
+ * removing every old HCD. USB core callbacks can therefore use this geometry
+ * without taking the registry lock throughout the HCD lifetime.
+ */
 extern unsigned int vhci_hc_ports;
 /*
  * Protects the published pool and controller readiness. Lookup callers must
@@ -141,6 +146,7 @@ void vhci_set_ready(struct vhci *vhci, bool ready);
 int vhci_get_configuration(unsigned int *controllers, unsigned int *ports);
 int vhci_manager_start(void);
 void vhci_manager_stop(void);
+int vhci_configure(unsigned int controllers, unsigned int ports);
 extern struct attribute_group vhci_attr_group;
 
 /* vhci_hcd.c */
@@ -153,6 +159,7 @@ int vhci_init_attr_group(unsigned int count);
 void vhci_finish_attr_group(void);
 extern struct device_attribute dev_attr_status;
 extern struct device_attribute dev_attr_num_ports;
+extern struct driver_attribute driver_attr_configuration;
 extern struct driver_attribute driver_attr_nports;
 extern struct driver_attribute driver_attr_detach;
 extern struct driver_attribute driver_attr_attach;

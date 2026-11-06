@@ -1548,6 +1548,7 @@ static const struct driver_attribute * const vhci_control_attrs[] = {
 	&driver_attr_nports,
 	&driver_attr_detach,
 	&driver_attr_attach,
+	&driver_attr_configuration,
 };
 
 static struct attribute *vhci_dev_attrs[] = {
