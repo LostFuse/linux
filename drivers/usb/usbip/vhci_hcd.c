@@ -46,6 +46,14 @@ static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
 int vhci_num_controllers = VHCI_NR_HCS;
 struct vhci *vhcis;
+DECLARE_RWSEM(vhci_registry_lock);
+
+void vhci_set_ready(struct vhci *vhci, bool ready)
+{
+	down_write(&vhci_registry_lock);
+	vhci->ready = ready;
+	up_write(&vhci_registry_lock);
+}
 
 static const char * const bit_desc[] = {
 	"CONNECTION",		/*0*/
@@ -1405,6 +1413,7 @@ static int vhci_hcd_probe(struct platform_device *pdev)
 	}
 
 	usbip_dbg_vhci_hc("bye\n");
+	vhci_set_ready(vhci, true);
 	return 0;
 
 put_usb3_hcd:
@@ -1421,6 +1430,8 @@ put_usb2_hcd:
 static void vhci_hcd_remove(struct platform_device *pdev)
 {
 	struct vhci *vhci = *((void **)dev_get_platdata(&pdev->dev));
+
+	vhci_set_ready(vhci, false);
 
 	/*
 	 * Disconnects the root hub,

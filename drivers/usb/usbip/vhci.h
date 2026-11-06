@@ -9,6 +9,7 @@
 
 #include <linux/device.h>
 #include <linux/list.h>
+#include <linux/rwsem.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
@@ -92,6 +93,7 @@ enum hub_speed {
 
 struct vhci {
 	spinlock_t lock;
+	bool ready;
 
 	struct platform_device *pdev;
 
@@ -118,6 +120,9 @@ struct vhci_hcd {
 	struct vhci_device vdev[VHCI_HC_PORTS];
 };
 
+/* Sysfs readers hold this lock while using a controller and its HCDs. */
+extern struct rw_semaphore vhci_registry_lock;
+void vhci_set_ready(struct vhci *vhci, bool ready);
 extern int vhci_num_controllers;
 extern struct vhci *vhcis;
 extern struct attribute_group vhci_attr_group;

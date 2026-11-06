@@ -4,6 +4,7 @@
  * Copyright (C) 2015-2016 Nobuo Iwata
  */
 
+#include <linux/cleanup.h>
 #include <linux/kthread.h>
 #include <linux/file.h>
 #include <linux/net.h>
@@ -85,28 +86,13 @@ static ssize_t status_show_not_ready(int pdev_nr, char *out)
 /* Sysfs entry to show port status */
 static ssize_t status_show_vhci(int pdev_nr, char *out)
 {
-	struct platform_device *pdev = vhcis[pdev_nr].pdev;
-	struct vhci *vhci;
-	struct usb_hcd *hcd;
-	struct vhci_hcd *vhci_hcd;
+	struct vhci *vhci = &vhcis[pdev_nr];
 	char *s = out;
 	int i;
 	unsigned long flags;
 
-	if (!pdev || !out) {
-		usbip_dbg_vhci_sysfs("show status error\n");
-		return 0;
-	}
-
-	hcd = platform_get_drvdata(pdev);
-
-	if (!hcd) {
-		usbip_dbg_vhci_sysfs("show status error (hcd is NULL)\n");
+	if (!vhci->ready)
 		return status_show_not_ready(pdev_nr, out);
-	}
-
-	vhci_hcd = hcd_to_vhci_hcd(hcd);
-	vhci = vhci_hcd->vhci;
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
@@ -156,14 +142,15 @@ static ssize_t status_show(struct device *dev,
 	char *s = out;
 	int pdev_nr;
 
+	guard(rwsem_read)(&vhci_registry_lock);
 	out += sprintf(out,
 		       "hub port sta spd dev      sockfd local_busid\n");
 
 	pdev_nr = status_name_to_id(attr->attr.name);
-	if (pdev_nr < 0)
-		out += status_show_not_ready(pdev_nr, out);
-	else
-		out += status_show_vhci(pdev_nr, out);
+	if (pdev_nr < 0 || pdev_nr >= vhci_num_controllers)
+		return -EINVAL;
+	pdev_nr = array_index_nospec(pdev_nr, vhci_num_controllers);
+	out += status_show_vhci(pdev_nr, out);
 
 	return out - s;
 }
@@ -240,9 +227,11 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 			    const char *buf, size_t count)
 {
 	__u32 port = 0, pdev_nr = 0, rhport = 0;
-	struct usb_hcd *hcd;
+	struct vhci *vhci;
 	struct vhci_hcd *vhci_hcd;
 	int ret;
+
+	guard(rwsem_read)(&vhci_registry_lock);
 
 	if (kstrtoint(buf, 10, &port) < 0)
 		return -EINVAL;
@@ -253,8 +242,8 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	if (!valid_port(&pdev_nr, &rhport))
 		return -EINVAL;
 
-	hcd = platform_get_drvdata(vhcis[pdev_nr].pdev);
-	if (hcd == NULL) {
+	vhci = &vhcis[pdev_nr];
+	if (!vhci->ready) {
 		dev_err(dev, "port is not ready %u\n", port);
 		return -EAGAIN;
 	}
@@ -262,9 +251,9 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	usbip_dbg_vhci_sysfs("rhport %d\n", rhport);
 
 	if ((port / VHCI_HC_PORTS) % 2)
-		vhci_hcd = hcd_to_vhci_hcd(hcd)->vhci->vhci_hcd_ss;
+		vhci_hcd = vhci->vhci_hcd_ss;
 	else
-		vhci_hcd = hcd_to_vhci_hcd(hcd)->vhci->vhci_hcd_hs;
+		vhci_hcd = vhci->vhci_hcd_hs;
 
 	ret = vhci_port_disconnect(vhci_hcd, rhport);
 	if (ret < 0)
@@ -318,14 +307,14 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	struct socket *socket;
 	int sockfd = 0;
 	__u32 port = 0, pdev_nr = 0, rhport = 0, devid = 0, speed = 0;
-	struct usb_hcd *hcd;
-	struct vhci_hcd *vhci_hcd;
 	struct vhci_device *vdev;
 	struct vhci *vhci;
 	int err;
 	unsigned long flags;
 	struct task_struct *tcp_rx = NULL;
 	struct task_struct *tcp_tx = NULL;
+
+	guard(rwsem_read)(&vhci_registry_lock);
 
 	/*
 	 * @rhport: port number of vhci_hcd
@@ -347,14 +336,11 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	if (!valid_args(&pdev_nr, &rhport, speed))
 		return -EINVAL;
 
-	hcd = platform_get_drvdata(vhcis[pdev_nr].pdev);
-	if (hcd == NULL) {
+	vhci = &vhcis[pdev_nr];
+	if (!vhci->ready) {
 		dev_err(dev, "port %d is not ready\n", port);
 		return -EAGAIN;
 	}
-
-	vhci_hcd = hcd_to_vhci_hcd(hcd);
-	vhci = vhci_hcd->vhci;
 
 	if (speed >= USB_SPEED_SUPER)
 		vdev = &vhci->vhci_hcd_ss->vdev[rhport];
