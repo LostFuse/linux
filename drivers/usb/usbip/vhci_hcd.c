@@ -44,10 +44,6 @@ static int vhci_get_frame_number(struct usb_hcd *hcd);
 static const char driver_name[] = "vhci_hcd";
 static const char driver_desc[] = "USB/IP Virtual Host Controller";
 
-int vhci_num_controllers = VHCI_NR_HCS;
-struct vhci *vhcis;
-DECLARE_RWSEM(vhci_registry_lock);
-
 void vhci_set_ready(struct vhci *vhci, bool ready)
 {
 	down_write(&vhci_registry_lock);
@@ -1527,67 +1523,32 @@ static struct platform_driver vhci_driver = {
 	},
 };
 
-static void del_platform_devices(void)
-{
-	int i;
-
-	for (i = 0; i < vhci_num_controllers; i++) {
-		platform_device_unregister(vhcis[i].pdev);
-		vhcis[i].pdev = NULL;
-	}
-	sysfs_remove_link(&platform_bus.kobj, driver_name);
-}
-
 static int __init vhci_hcd_init(void)
 {
-	int i, ret;
+	int ret;
 
 	if (usb_disabled())
 		return -ENODEV;
 
-	if (vhci_num_controllers < 1)
-		vhci_num_controllers = 1;
-
-	vhcis = kzalloc_objs(struct vhci, vhci_num_controllers);
-	if (vhcis == NULL)
-		return -ENOMEM;
-
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
-		goto err_driver_register;
+		return ret;
 
-	for (i = 0; i < vhci_num_controllers; i++) {
-		void *vhci = &vhcis[i];
-		struct platform_device_info pdevinfo = {
-			.name = driver_name,
-			.id = i,
-			.data = &vhci,
-			.size_data = sizeof(void *),
-		};
-
-		vhcis[i].pdev = platform_device_register_full(&pdevinfo);
-		ret = PTR_ERR_OR_ZERO(vhcis[i].pdev);
-		if (ret < 0) {
-			while (i--)
-				platform_device_unregister(vhcis[i].pdev);
-			goto err_add_hcd;
-		}
-	}
+	ret = vhci_manager_start();
+	if (ret)
+		goto unregister_driver;
 
 	return 0;
 
-err_add_hcd:
+unregister_driver:
 	platform_driver_unregister(&vhci_driver);
-err_driver_register:
-	kfree(vhcis);
 	return ret;
 }
 
 static void __exit vhci_hcd_exit(void)
 {
-	del_platform_devices();
+	vhci_manager_stop();
 	platform_driver_unregister(&vhci_driver);
-	kfree(vhcis);
 }
 
 module_init(vhci_hcd_init);

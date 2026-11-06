@@ -86,7 +86,7 @@ static ssize_t status_show_not_ready(int pdev_nr, char *out)
 /* Sysfs entry to show port status */
 static ssize_t status_show_vhci(int pdev_nr, char *out)
 {
-	struct vhci *vhci = &vhcis[pdev_nr];
+	struct vhci *vhci = vhci_get_controller(pdev_nr);
 	char *s = out;
 	int i;
 	unsigned long flags;
@@ -147,9 +147,9 @@ static ssize_t status_show(struct device *dev,
 		       "hub port sta spd dev      sockfd local_busid\n");
 
 	pdev_nr = status_name_to_id(attr->attr.name);
-	if (pdev_nr < 0 || pdev_nr >= vhci_num_controllers)
+	if (pdev_nr < 0 || pdev_nr >= vhci_get_controller_count())
 		return -EINVAL;
-	pdev_nr = array_index_nospec(pdev_nr, vhci_num_controllers);
+	pdev_nr = array_index_nospec(pdev_nr, vhci_get_controller_count());
 	out += status_show_vhci(pdev_nr, out);
 
 	return out - s;
@@ -164,7 +164,8 @@ static ssize_t nports_show(struct device *dev, struct device_attribute *attr,
 	 * Half the ports are for SPEED_HIGH and half for SPEED_SUPER,
 	 * thus the * 2.
 	 */
-	out += sprintf(out, "%d\n", VHCI_PORTS * vhci_num_controllers);
+	out += sprintf(out, "%u\n",
+		       VHCI_PORTS * vhci_get_controller_count());
 	return out - s;
 }
 static DEVICE_ATTR_RO(nports);
@@ -208,11 +209,13 @@ static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
 
 static int valid_port(__u32 *pdev_nr, __u32 *rhport)
 {
-	if (*pdev_nr >= vhci_num_controllers) {
+	unsigned int count = vhci_get_controller_count();
+
+	if (*pdev_nr >= count) {
 		pr_err("pdev %u\n", *pdev_nr);
 		return 0;
 	}
-	*pdev_nr = array_index_nospec(*pdev_nr, vhci_num_controllers);
+	*pdev_nr = array_index_nospec(*pdev_nr, count);
 
 	if (*rhport >= VHCI_HC_PORTS) {
 		pr_err("rhport %u\n", *rhport);
@@ -242,7 +245,7 @@ static ssize_t detach_store(struct device *dev, struct device_attribute *attr,
 	if (!valid_port(&pdev_nr, &rhport))
 		return -EINVAL;
 
-	vhci = &vhcis[pdev_nr];
+	vhci = vhci_get_controller(pdev_nr);
 	if (!vhci->ready) {
 		dev_err(dev, "port is not ready %u\n", port);
 		return -EAGAIN;
@@ -336,7 +339,7 @@ static ssize_t attach_store(struct device *dev, struct device_attribute *attr,
 	if (!valid_args(&pdev_nr, &rhport, speed))
 		return -EINVAL;
 
-	vhci = &vhcis[pdev_nr];
+	vhci = vhci_get_controller(pdev_nr);
 	if (!vhci->ready) {
 		dev_err(dev, "port %d is not ready\n", port);
 		return -EAGAIN;
@@ -466,13 +469,14 @@ static void set_status_attr(int id)
 
 static int init_status_attrs(void)
 {
-	int id;
+	unsigned int count = vhci_get_controller_count();
+	unsigned int id;
 
-	status_attrs = kzalloc_objs(struct status_attr, vhci_num_controllers);
+	status_attrs = kzalloc_objs(struct status_attr, count);
 	if (status_attrs == NULL)
 		return -ENOMEM;
 
-	for (id = 0; id < vhci_num_controllers; id++)
+	for (id = 0; id < count; id++)
 		set_status_attr(id);
 
 	return 0;
@@ -489,10 +493,12 @@ struct attribute_group vhci_attr_group = {
 
 int vhci_init_attr_group(void)
 {
+	unsigned int count = vhci_get_controller_count();
+	unsigned int i;
 	struct attribute **attrs;
-	int ret, i;
+	int ret;
 
-	attrs = kzalloc_objs(struct attribute *, (vhci_num_controllers + 5));
+	attrs = kzalloc_objs(struct attribute *, count + 5);
 	if (attrs == NULL)
 		return -ENOMEM;
 
@@ -505,7 +511,7 @@ int vhci_init_attr_group(void)
 	*(attrs + 1) = &dev_attr_detach.attr;
 	*(attrs + 2) = &dev_attr_attach.attr;
 	*(attrs + 3) = &dev_attr_usbip_debug.attr;
-	for (i = 0; i < vhci_num_controllers; i++)
+	for (i = 0; i < count; i++)
 		*(attrs + i + 4) = &((status_attrs + i)->attr.attr);
 	vhci_attr_group.attrs = attrs;
 	return 0;

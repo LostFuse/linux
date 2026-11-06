@@ -123,8 +123,10 @@ struct vhci_hcd {
 /* Sysfs readers hold this lock while using a controller and its HCDs. */
 extern struct rw_semaphore vhci_registry_lock;
 void vhci_set_ready(struct vhci *vhci, bool ready);
-extern int vhci_num_controllers;
-extern struct vhci *vhcis;
+unsigned int vhci_get_controller_count(void);
+struct vhci *vhci_get_controller(unsigned int id);
+int vhci_manager_start(void);
+void vhci_manager_stop(void);
 extern struct attribute_group vhci_attr_group;
 
 /* vhci_hcd.c */
