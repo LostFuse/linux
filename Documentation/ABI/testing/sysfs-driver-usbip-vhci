@@ -1,0 +1,94 @@
+What:		/sys/bus/platform/drivers/vhci_hcd/nports
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Read the total number of global ports as a decimal number with
+		a trailing newline. Each configured controller contributes its
+		high-speed and super-speed ports, including an unbound
+		controller's unavailable ports. An empty pool reports zero.
+		The mode is 0444. EAGAIN indicates pool replacement in progress.
+		Controller zero retains a legacy nports file with the same value.
+
+What:		/sys/bus/platform/drivers/vhci_hcd/attach
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Write four whitespace-separated decimal numbers: global port,
+		connected stream socket descriptor, remote device identifier
+		and USB speed. The identifier combines the remote bus number
+		in its upper 16 bits and device number in its lower 16 bits.
+		Speeds use enum usb_device_speed: 1 low, 2 full, 3 high,
+		4 wireless, 5 super and 6 super-plus. The port must belong to
+		the matching high-speed or super-speed hub.
+
+		The mode is 0200: only root may write. A successful write
+		reports the byte count and retains a reference to the socket.
+		EINVAL rejects malformed fields, an unsupported or mismatched
+		speed, or an invalid socket. ENODEV identifies an unavailable
+		port or unbound controller; EBUSY identifies an occupied port.
+		EAGAIN indicates pool replacement in progress. Discovery does
+		not reserve ports, so userspace must handle these races.
+		Controller zero retains attach with the same format and behavior.
+
+What:		/sys/bus/platform/drivers/vhci_hcd/detach
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Write one decimal global port number to request disconnect.
+		The mode is 0200: only root may write. A successful write
+		reports the byte count; disconnect completes asynchronously.
+		EINVAL rejects an invalid format, unavailable port or port that
+		is already idle. EAGAIN indicates pool replacement in progress.
+		Controller zero retains detach with the same behavior.
+
+What:		/sys/devices/platform/vhci_hcd.N/status
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Read-only (0444) status for controller N, also accessible through
+		/sys/bus/platform/drivers/vhci_hcd/vhci_hcd.N/status. The header
+		and columns match the legacy controller-zero status files:
+		hub, global port, state, speed, remote device identifier,
+		socket descriptor and local USB bus ID. Global ports are
+		contiguous across the configured pool; a controller's high-speed
+		ports precede its super-speed ports. ENODEV identifies an
+		unbound controller. Each table fits in one sysfs page.
+		The header names are hub, port, sta, spd, dev, sockfd and
+		local_busid. Hubs are hs or ss. States are 4 idle, 5 not yet
+		assigned, 6 in use and 7 error. Speeds use enum usb_device_speed.
+		Ports, states, speeds and descriptors are decimal; the remote
+		identifier is hexadecimal. An unused port reports zero device
+		fields and local bus ID 0-0.
+		Files are replaced when the pool is reconfigured; readers must
+		handle ENOENT, ENODEV and EAGAIN and refresh discovery.
+
+What:		/sys/devices/platform/vhci_hcd.N/num_ports
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Read-only decimal ports-per-hub for a bound controller. The
+		value is shared by all controllers and remains fixed until
+		reconfiguration. Global port numbers are provided by status.
+
+What:		/sys/devices/platform/vhci_hcd.0/nports
+What:		/sys/devices/platform/vhci_hcd.0/attach
+What:		/sys/devices/platform/vhci_hcd.0/detach
+What:		/sys/devices/platform/vhci_hcd.0/status.N
+Date:		November 2026
+Contact:	Jakub Lecki <lec.jakub@gmail.com>
+Description:
+		Silent compatibility interfaces for older USB/IP tools, present
+		on bound controller zero. nports, attach and detach use the same
+		formats, permissions and global ports as the driver attributes.
+		status.N names controllers N greater than zero and matches that
+		controller's status table; an unbound controller emits unassigned
+		rows. Current tools read status directly from each controller.
+
+		These interfaces emit no deprecation warnings and have no
+		scheduled removal. Controller zero's own status file is shared
+		by original and updated tools.
+
+		Original tools work only within their existing 8-bit port limit;
+		ports above 255 require updated tools. A status read does not
+		reserve a port: attach may report ENODEV, EBUSY or EINVAL if the
+		pool or the port's hub changed.

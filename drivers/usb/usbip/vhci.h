@@ -151,6 +151,11 @@ void rh_port_connect(struct vhci_device *vdev, enum usb_device_speed speed);
 /* vhci_sysfs.c */
 int vhci_init_attr_group(unsigned int count);
 void vhci_finish_attr_group(void);
+extern struct device_attribute dev_attr_status;
+extern struct device_attribute dev_attr_num_ports;
+extern struct driver_attribute driver_attr_nports;
+extern struct driver_attribute driver_attr_detach;
+extern struct driver_attribute driver_attr_attach;
 
 /* vhci_rx.c */
 struct urb *pickup_urb_and_free_priv(struct vhci_device *vdev, __u32 seqnum);

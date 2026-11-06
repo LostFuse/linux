@@ -29027,6 +29027,7 @@ M:	Shuah Khan <skhan@linuxfoundation.org>
 R:	Hongren Zheng <i@zenithal.me>
 L:	linux-usb@vger.kernel.org
 S:	Maintained
+F:	Documentation/ABI/testing/sysfs-driver-usbip-vhci
 F:	Documentation/usb/usbip_protocol.rst
 F:	drivers/usb/usbip/
 F:	tools/testing/selftests/drivers/usb/usbip/

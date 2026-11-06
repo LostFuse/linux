@@ -1544,6 +1544,19 @@ static int vhci_hcd_resume(struct platform_device *pdev)
 
 #endif
 
+static const struct driver_attribute * const vhci_control_attrs[] = {
+	&driver_attr_nports,
+	&driver_attr_detach,
+	&driver_attr_attach,
+};
+
+static struct attribute *vhci_dev_attrs[] = {
+	&dev_attr_status.attr,
+	&dev_attr_num_ports.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(vhci_dev);
+
 static const struct platform_device_id vhci_device_ids[] = {
 	{ "vhci_hcd" },
 	{ }
@@ -1558,8 +1571,35 @@ static struct platform_driver vhci_driver = {
 	.resume	= vhci_hcd_resume,
 	.driver	= {
 		.name = driver_name,
+		.dev_groups = vhci_dev_groups,
 	},
 };
+
+static void vhci_remove_driver_attrs(void)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(vhci_control_attrs); i++)
+		driver_remove_file(&vhci_driver.driver, vhci_control_attrs[i]);
+}
+
+static int vhci_create_driver_attrs(void)
+{
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(vhci_control_attrs); i++) {
+		ret = driver_create_file(&vhci_driver.driver, vhci_control_attrs[i]);
+		if (ret) {
+			pr_err("vhci_hcd: create driver attribute %s failed, err = %d\n",
+			       vhci_control_attrs[i]->attr.name, ret);
+			while (i--)
+				driver_remove_file(&vhci_driver.driver,
+						   vhci_control_attrs[i]);
+			return ret;
+		}
+	}
+	return 0;
+}
 
 static int __init vhci_hcd_init(void)
 {
@@ -1575,6 +1615,11 @@ static int __init vhci_hcd_init(void)
 	if (ret)
 		goto unregister_driver;
 
+	ret = vhci_create_driver_attrs();
+	if (ret) {
+		vhci_manager_stop();
+		goto unregister_driver;
+	}
 	return 0;
 
 unregister_driver:
@@ -1584,6 +1629,7 @@ unregister_driver:
 
 static void __exit vhci_hcd_exit(void)
 {
+	vhci_remove_driver_attrs();
 	vhci_manager_stop();
 	platform_driver_unregister(&vhci_driver);
 }

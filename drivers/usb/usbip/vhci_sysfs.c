@@ -70,7 +70,7 @@ static ssize_t status_show_vhci(struct vhci *vhci, char *out)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
+	for (i = 0; i < vhci_hc_ports; i++) {
 		struct vhci_device *vdev = &vhci->vhci_hcd_hs->vdev[i];
 
 		spin_lock(&vdev->ud.lock);
@@ -79,12 +79,12 @@ static ssize_t status_show_vhci(struct vhci *vhci, char *out)
 		spin_unlock(&vdev->ud.lock);
 	}
 
-	for (i = 0; i < VHCI_HC_PORTS; i++) {
+	for (i = 0; i < vhci_hc_ports; i++) {
 		struct vhci_device *vdev = &vhci->vhci_hcd_ss->vdev[i];
 
 		spin_lock(&vdev->ud.lock);
 		port_show_vhci(&out, HUB_SPEED_SUPER,
-			       vhci->id * VHCI_PORTS + VHCI_HC_PORTS + i, vdev);
+			       vhci->id * VHCI_PORTS + vhci_hc_ports + i, vdev);
 		spin_unlock(&vdev->ud.lock);
 	}
 
@@ -112,11 +112,31 @@ static ssize_t status_show_id(int id, char *out, bool legacy)
 
 		for (i = 0; i < VHCI_PORTS; i++)
 			out += sprintf(out, "%s  %04u %03u 000 00000000 000000 0-0\n",
-				       i < VHCI_HC_PORTS ? "hs" : "ss",
+				       i < vhci_hc_ports ? "hs" : "ss",
 				       vhci->id * VHCI_PORTS + i, VDEV_ST_NOTASSIGNED);
 	}
 	return out - s;
 }
+
+static ssize_t status_show(struct device *dev,
+			   struct device_attribute *attr, char *out)
+{
+	return status_show_id(to_platform_device(dev)->id, out, false);
+}
+DEVICE_ATTR_RO(status);
+
+static ssize_t num_ports_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct vhci *vhci;
+
+	guard(rwsem_read)(&vhci_registry_lock);
+	vhci = vhci_get_controller(to_platform_device(dev)->id);
+	if (!vhci || !vhci->ready)
+		return -ENODEV;
+	return sysfs_emit(buf, "%u\n", vhci_hc_ports);
+}
+DEVICE_ATTR_RO(num_ports);
 
 static ssize_t nports_show_value(char *out)
 {
@@ -126,6 +146,12 @@ static ssize_t nports_show_value(char *out)
 	ret = vhci_get_configuration(&controllers, &ports);
 	return ret ? ret : sysfs_emit(out, "%u\n", 2 * ports * controllers);
 }
+
+static ssize_t nports_show(struct device_driver *driver, char *out)
+{
+	return nports_show_value(out);
+}
+DRIVER_ATTR_RO(nports);
 
 /* Sysfs entry to shutdown a virtual connection */
 static int vhci_port_disconnect(struct vhci_hcd *vhci_hcd, __u32 rhport)
@@ -173,8 +199,8 @@ static struct vhci_hcd *resolve_port(u32 port, u32 *rhport)
 	if (!vhci)
 		return NULL;
 	relative = port % VHCI_PORTS;
-	*rhport = array_index_nospec(relative % VHCI_HC_PORTS, VHCI_HC_PORTS);
-	return relative < VHCI_HC_PORTS ? vhci->vhci_hcd_hs : vhci->vhci_hcd_ss;
+	*rhport = array_index_nospec(relative % vhci_hc_ports, vhci_hc_ports);
+	return relative < vhci_hc_ports ? vhci->vhci_hcd_hs : vhci->vhci_hcd_ss;
 }
 
 static ssize_t vhci_detach(const char *buf, size_t count)
@@ -194,6 +220,13 @@ static ssize_t vhci_detach(const char *buf, size_t count)
 	ret = vhci_port_disconnect(hcd, rhport);
 	return ret ? ret : count;
 }
+
+static ssize_t detach_store(struct device_driver *driver,
+			    const char *buf, size_t count)
+{
+	return vhci_detach(buf, count);
+}
+DRIVER_ATTR_WO(detach);
 
 static int valid_speed(enum usb_device_speed speed)
 {
@@ -358,9 +391,17 @@ unlock_mutex:
 	return err;
 }
 
+static ssize_t attach_store(struct device_driver *driver,
+			    const char *buf, size_t count)
+{
+	return vhci_attach(buf, count);
+}
+DRIVER_ATTR_WO(attach);
+
 /*
- * Controller-zero controls and status. Keep their wrappers and
- * registration data together while controller storage changes.
+ * Silent controller-zero compatibility interface. Keep its wrappers
+ * and registration data together for existing userspace.
+ * Current tools use driver controls and each device's status file.
  */
 static ssize_t nports_dev_show(struct device *dev,
 			       struct device_attribute *attr, char *out)
@@ -414,7 +455,7 @@ int vhci_init_attr_group(unsigned int count)
 	struct attribute **attrs;
 	int i;
 
-	attrs = kzalloc_objs(struct attribute *, count + 5);
+	attrs = kzalloc_objs(struct attribute *, count + 4);
 	if (!attrs)
 		return -ENOMEM;
 
@@ -428,19 +469,17 @@ int vhci_init_attr_group(unsigned int count)
 	attrs[1] = &dev_attr_detach.attr;
 	attrs[2] = &dev_attr_attach.attr;
 	attrs[3] = &dev_attr_usbip_debug.attr;
-	for (i = 0; i < count; i++) {
+	/* Controller zero's status is provided by the device group. */
+	for (i = 1; i < count; i++) {
 		struct status_attr *status = &status_attrs[i];
 
 		status->id = i;
-		if (i)
-			snprintf(status->name, sizeof(status->name), "status.%d", i);
-		else
-			strscpy(status->name, "status");
+		snprintf(status->name, sizeof(status->name), "status.%d", i);
 		status->attr.attr.name = status->name;
 		status->attr.attr.mode = 0444;
 		status->attr.show = status_legacy_show;
 		sysfs_attr_init(&status->attr.attr);
-		attrs[i + 4] = &status->attr.attr;
+		attrs[i + 3] = &status->attr.attr;
 	}
 	vhci_attr_group.attrs = attrs;
 	return 0;
@@ -452,4 +491,4 @@ void vhci_finish_attr_group(void)
 	kfree(vhci_attr_group.attrs);
 }
 
-/* End of the controller-zero interface. */
+/* End of the controller-zero compatibility interface. */
