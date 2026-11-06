@@ -12,7 +12,9 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <fcntl.h>
 #include <getopt.h>
@@ -78,42 +80,85 @@ static int record_connection(char *host, char *port, char *busid, int rhport)
 	return 0;
 }
 
+static int selected_port_changed(int port, uint32_t speed)
+{
+	enum hub_speed hub = speed >= USB_SPEED_SUPER ? HUB_SPEED_SUPER : HUB_SPEED_HIGH;
+
+	if (usbip_vhci_refresh_device_list() < 0)
+		return errno == ENODEV || errno == ENOENT || errno == EAGAIN;
+	return port >= vhci_driver->nports ||
+	       vhci_driver->idev[port].status == VDEV_ST_NOTASSIGNED ||
+	       vhci_driver->idev[port].hub != hub;
+}
+
 static int import_device(int sockfd, struct usbip_usb_device *udev)
 {
-	int rc;
-	int port;
+	struct timespec deadline, now;
 	uint32_t speed = udev->speed;
+	int rc, port, saved_errno;
 
-	rc = usbip_vhci_driver_open();
-	if (rc < 0) {
-		err("open vhci_driver (is vhci_hcd loaded?)");
-		goto err_out;
-	}
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline) < 0)
+		return -1;
+	deadline.tv_sec++;
 
-	do {
+	for (;;) {
+		rc = usbip_vhci_driver_open();
+		if (rc < 0) {
+			if (errno == ENODEV || errno == ENOENT || errno == EAGAIN)
+				goto retry;
+			err("open vhci_driver (is vhci_hcd loaded?)");
+			return -1;
+		}
+
 		port = usbip_vhci_get_free_port(speed);
 		if (port < 0) {
-			err("no free port");
+			if (errno == EAGAIN) {
+				usbip_vhci_driver_close();
+				errno = EAGAIN;
+				goto retry;
+			}
+			err("no available port for device speed");
 			goto err_driver_close;
 		}
 
 		dbg("got free port %d", port);
-
 		rc = usbip_vhci_attach_device(port, sockfd, udev->busnum,
 					      udev->devnum, udev->speed);
-		if (rc < 0 && errno != EBUSY) {
+		if (rc < 0 && errno == EINVAL) {
+			if (selected_port_changed(port, speed))
+				errno = EAGAIN;
+			else
+				errno = EINVAL;
+		}
+		if (rc < 0 && errno != EBUSY && errno != ENODEV &&
+		    errno != ENOENT && errno != EAGAIN) {
 			err("import device");
 			goto err_driver_close;
 		}
-	} while (rc < 0);
 
-	usbip_vhci_driver_close();
-
-	return port;
+		saved_errno = errno;
+		usbip_vhci_driver_close();
+		errno = saved_errno;
+		if (rc == 0)
+			return port;
+retry:
+		saved_errno = errno;
+		if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+			return -1;
+		if (now.tv_sec > deadline.tv_sec ||
+		    (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+			errno = saved_errno;
+			err("import device");
+			return -1;
+		}
+		usleep(10000);
+		errno = saved_errno;
+	}
 
 err_driver_close:
+	saved_errno = errno;
 	usbip_vhci_driver_close();
-err_out:
+	errno = saved_errno;
 	return -1;
 }
 
@@ -184,10 +229,9 @@ static int attach_device(char *host, char *busid)
 	}
 
 	rhport = query_import_device(sockfd, busid);
+	close(sockfd);
 	if (rhport < 0)
 		return -1;
-
-	close(sockfd);
 
 	rc = record_connection(host, usbip_port_string, busid, rhport);
 	if (rc < 0) {

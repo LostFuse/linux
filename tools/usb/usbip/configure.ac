@@ -4,8 +4,8 @@ AC_PREREQ(2.59)
 AC_INIT([usbip-utils], [2.0], [linux-usb@vger.kernel.org])
 AC_DEFINE([USBIP_VERSION], [0x00000111], [binary-coded decimal version number])
 
-CURRENT=0
-REVISION=1
+CURRENT=1
+REVISION=0
 AGE=0
 AC_SUBST([LIBUSBIP_VERSION], [$CURRENT:$REVISION:$AGE], [library version])
 

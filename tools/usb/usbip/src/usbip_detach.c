@@ -5,6 +5,7 @@
  */
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -32,7 +33,8 @@ void usbip_detach_usage(void)
 static int detach_port(char *port)
 {
 	int ret = 0;
-	uint8_t portnum;
+	uint32_t portnum;
+	unsigned long parsed_port;
 	char path[PATH_MAX+1];
 	int i;
 	struct usbip_imported_device *idev;
@@ -46,7 +48,13 @@ static int detach_port(char *port)
 			return -1;
 		}
 
-	portnum = atoi(port);
+	errno = 0;
+	parsed_port = strtoul(port, NULL, 10);
+	if (!port_len || errno || parsed_port > INT_MAX) {
+		err("invalid port %s", port);
+		return -1;
+	}
+	portnum = parsed_port;
 
 	ret = usbip_vhci_driver_open();
 	if (ret < 0) {
@@ -62,7 +70,7 @@ static int detach_port(char *port)
 			found = 1;
 			if (idev->status != VDEV_ST_NULL)
 				break;
-			info("Port %d is already detached!\n", idev->port);
+			info("Port %u is already detached!\n", idev->port);
 			goto call_driver_close;
 		}
 	}
@@ -75,7 +83,7 @@ static int detach_port(char *port)
 	}
 
 	/* remove the port state file */
-	snprintf(path, PATH_MAX, VHCI_STATE_PATH"/port%d", portnum);
+	snprintf(path, PATH_MAX, VHCI_STATE_PATH "/port%u", portnum);
 
 	remove(path);
 	rmdir(VHCI_STATE_PATH);
@@ -83,10 +91,10 @@ static int detach_port(char *port)
 	ret = usbip_vhci_detach_device(portnum);
 	if (ret < 0) {
 		ret = -1;
-		err("Port %d detach request failed!\n", portnum);
+		err("Port %u detach request failed!\n", portnum);
 		goto call_driver_close;
 	}
-	info("Port %d is now detached!\n", portnum);
+	info("Port %u is now detached!\n", portnum);
 
 call_driver_close:
 	usbip_vhci_driver_close();

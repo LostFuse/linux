@@ -21,7 +21,7 @@ enum hub_speed {
 
 struct usbip_imported_device {
 	enum hub_speed hub;
-	uint8_t port;
+	uint32_t port;
 	uint32_t status;
 
 	uint32_t devid;
@@ -53,14 +53,14 @@ int  usbip_vhci_refresh_device_list(void);
 
 
 int usbip_vhci_get_free_port(uint32_t speed);
-int usbip_vhci_attach_device2(uint8_t port, int sockfd, uint32_t devid,
-		uint32_t speed);
+int usbip_vhci_attach_device2(uint32_t port, int sockfd, uint32_t devid,
+			      uint32_t speed);
 
 /* will be removed */
-int usbip_vhci_attach_device(uint8_t port, int sockfd, uint8_t busnum,
-		uint8_t devnum, uint32_t speed);
+int usbip_vhci_attach_device(uint32_t port, int sockfd, uint8_t busnum,
+			     uint8_t devnum, uint32_t speed);
 
-int usbip_vhci_detach_device(uint8_t port);
+int usbip_vhci_detach_device(uint32_t port);
 
 int usbip_vhci_imported_device_dump(struct usbip_imported_device *idev);
 

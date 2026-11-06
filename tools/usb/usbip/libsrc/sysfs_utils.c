@@ -11,22 +11,53 @@ int write_sysfs_attribute(const char *attr_path, const char *new_value,
 			  size_t len)
 {
 	int fd;
-	int length;
+	int length, saved_errno;
 
 	fd = open(attr_path, O_WRONLY);
 	if (fd < 0) {
+		saved_errno = errno;
 		dbg("error opening attribute %s", attr_path);
+		errno = saved_errno;
 		return -1;
 	}
 
 	length = write(fd, new_value, len);
 	if (length < 0) {
+		saved_errno = errno;
 		dbg("error writing to attribute %s", attr_path);
 		close(fd);
+		errno = saved_errno;
 		return -1;
 	}
 
 	close(fd);
 
+	return 0;
+}
+
+int read_sysfs_attribute(const char *attr_path, char *value, size_t len)
+{
+	int fd;
+	int length, saved_errno;
+
+	fd = open(attr_path, O_RDONLY);
+	if (fd < 0) {
+		saved_errno = errno;
+		dbg("error opening attribute %s", attr_path);
+		errno = saved_errno;
+		return -1;
+	}
+
+	length = read(fd, value, len - 1);
+	if (length < 0) {
+		saved_errno = errno;
+		dbg("error reading from attribute %s", attr_path);
+		close(fd);
+		errno = saved_errno;
+		return -1;
+	}
+
+	value[length] = '\0';
+	close(fd);
 	return 0;
 }
