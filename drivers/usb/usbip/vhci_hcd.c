@@ -227,7 +227,7 @@ static int vhci_hub_status(struct usb_hcd *hcd, char *buf)
 {
 	struct vhci_hcd	*vhci_hcd = hcd_to_vhci_hcd(hcd);
 	struct vhci *vhci = vhci_hcd->vhci;
-	int		retval = DIV_ROUND_UP(VHCI_HC_PORTS + 1, 8);
+	int		retval = DIV_ROUND_UP(vhci_hc_ports + 1, 8);
 	int		rhport;
 	int		changed = 0;
 	unsigned long	flags;
@@ -241,7 +241,7 @@ static int vhci_hub_status(struct usb_hcd *hcd, char *buf)
 	}
 
 	/* check pseudo status register for each port */
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		if ((vhci_hcd->port_status[rhport] & PORT_C_MASK)) {
 			/* The status of a port has been changed, */
 			usbip_dbg_vhci_rh("port %d status changed\n", rhport);
@@ -288,7 +288,7 @@ ss_hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->bDescLength = 12;
 	desc->wHubCharacteristics = cpu_to_le16(
 		HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_COMMON_OCPM);
-	desc->bNbrPorts = VHCI_HC_PORTS;
+	desc->bNbrPorts = vhci_hc_ports;
 	desc->u.ss.bHubHdrDecLat = 0x04; /* Worst case: 0.4 micro sec*/
 	desc->u.ss.DeviceRemovable = 0xffff;
 }
@@ -302,8 +302,7 @@ static inline void hub_descriptor(struct usb_hub_descriptor *desc)
 	desc->wHubCharacteristics = cpu_to_le16(
 		HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_COMMON_OCPM);
 
-	desc->bNbrPorts = VHCI_HC_PORTS;
-	BUILD_BUG_ON(VHCI_HC_PORTS > USB_MAXCHILDREN);
+	desc->bNbrPorts = vhci_hc_ports;
 	width = desc->bNbrPorts / 8 + 1;
 	desc->bDescLength = USB_DT_HUB_NONVAR_SIZE + 2 * width;
 	memset(&desc->u.hs.DeviceRemovable[0], 0, width);
@@ -320,7 +319,10 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	unsigned long	flags;
 	bool invalid_rhport = false;
 
-	u32 prev_port_status[VHCI_HC_PORTS];
+	u32 prev_port_status[USB_SS_MAXPORTS];
+
+	vhci_hcd = hcd_to_vhci_hcd(hcd);
+	vhci = vhci_hcd->vhci;
 
 	if (!HCD_HW_ACCESSIBLE(hcd))
 		return -ETIMEDOUT;
@@ -335,14 +337,14 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 	/*
 	 * wIndex can be 0 for some request types (typeReq). rhport is
-	 * in valid range when wIndex >= 1 and < VHCI_HC_PORTS.
+	 * in valid range when wIndex >= 1 and <= vhci_hc_ports.
 	 *
 	 * Reference port_status[] only with valid rhport when
 	 * invalid_rhport is false.
 	 */
-	if (wIndex < 1 || wIndex > VHCI_HC_PORTS) {
+	if (wIndex < 1 || wIndex > vhci_hc_ports) {
 		invalid_rhport = true;
-		if (wIndex > VHCI_HC_PORTS)
+		if (wIndex > vhci_hc_ports)
 			dev_err(hcd_dev(hcd), "invalid port number %d\n", wIndex);
 	} else {
 		rhport = wIndex - 1;
@@ -357,7 +359,7 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	if (usbip_dbg_flag_vhci_rh) {
 		if (!invalid_rhport)
 			memcpy(prev_port_status, vhci_hcd->port_status,
-				sizeof(prev_port_status));
+				vhci_hc_ports * sizeof(*prev_port_status));
 	}
 
 	switch (typeReq) {
@@ -701,7 +703,7 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	struct vhci_device *vdev;
 	unsigned long flags;
 
-	if (portnum > VHCI_HC_PORTS) {
+	if (!portnum || portnum > vhci_hc_ports) {
 		dev_err(hcd_dev(hcd), "invalid port number %d\n", portnum);
 		return -ENODEV;
 	}
@@ -1123,9 +1125,10 @@ static void vhci_device_unusable(struct usbip_device *ud)
 	spin_unlock_irqrestore(&ud->lock, flags);
 }
 
-static void vhci_device_init(struct vhci_device *vdev)
+static void vhci_device_init(struct vhci_device *vdev, struct vhci_hcd *hcd)
 {
 	memset(vdev, 0, sizeof(struct vhci_device));
+	vdev->hcd = hcd;
 
 	vdev->ud.side   = USBIP_VHCI;
 	vdev->ud.status = VDEV_ST_NULL;
@@ -1179,8 +1182,7 @@ static int vhci_start(struct usb_hcd *hcd)
 {
 	struct vhci_hcd *vhci_hcd = hcd_to_vhci_hcd(hcd);
 	struct vhci *vhci = vhci_hcd->vhci;
-	int rhport;
-	int err;
+	int rhport, err;
 
 	usbip_dbg_vhci_hc("enter vhci_start\n");
 
@@ -1189,10 +1191,10 @@ static int vhci_start(struct usb_hcd *hcd)
 
 	/* initialize private data of usb_hcd */
 
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		struct vhci_device *vdev = &vhci_hcd->vdev[rhport];
 
-		vhci_device_init(vdev);
+		vhci_device_init(vdev, vhci_hcd);
 		vdev->rhport = rhport;
 	}
 
@@ -1206,7 +1208,8 @@ static int vhci_start(struct usb_hcd *hcd)
 #endif
 
 	/* Legacy userland controls remain on controller zero. */
-	if (vhci->id == 0 && usb_hcd_is_primary_hcd(hcd)) {
+	if (vhci->id == 0 &&
+	    usb_hcd_is_primary_hcd(hcd)) {
 		err = vhci_init_attr_group(vhci_get_controller_count());
 		if (err) {
 			dev_err(hcd_dev(hcd), "init attr group failed, err = %d\n", err);
@@ -1233,13 +1236,14 @@ static void vhci_stop(struct usb_hcd *hcd)
 	usbip_dbg_vhci_hc("stop VHCI controller\n");
 
 	/* 1. remove the userland interface of vhci_hcd */
-	if (vhci->id == 0 && usb_hcd_is_primary_hcd(hcd)) {
+	if (vhci->id == 0 &&
+	    usb_hcd_is_primary_hcd(hcd)) {
 		sysfs_remove_group(&hcd_dev(hcd)->kobj, &vhci_attr_group);
 		vhci_finish_attr_group();
 	}
 
 	/* 2. shutdown all the ports of vhci_hcd */
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		struct vhci_device *vdev = &vhci_hcd->vdev[rhport];
 
 		usbip_event_add(&vdev->ud, VDEV_EVENT_REMOVED);
@@ -1337,6 +1341,68 @@ static const struct hc_driver vhci_hc_driver = {
 	.free_streams	= vhci_free_streams,
 };
 
+static struct usb_hcd *vhci_alloc_hcd(struct platform_device *pdev,
+				      struct usb_hcd *primary, unsigned int ports)
+{
+	struct vhci_hcd *private;
+	struct usb_hcd *hcd;
+
+	hcd = usb_create_shared_hcd(&vhci_hc_driver, &pdev->dev,
+				    pdev->name, primary);
+	if (!hcd)
+		return NULL;
+
+	private = hcd_to_vhci_hcd(hcd);
+	private->port_status = kcalloc(ports,
+				       sizeof(*private->port_status), GFP_KERNEL);
+	private->vdev = kcalloc(ports, sizeof(*private->vdev), GFP_KERNEL);
+	if (!private->port_status || !private->vdev) {
+		kfree(private->vdev);
+		kfree(private->port_status);
+		usb_put_hcd(hcd);
+		return NULL;
+	}
+	return hcd;
+}
+
+static void vhci_put_hcd(struct usb_hcd *hcd)
+{
+	struct vhci_hcd *private = hcd_to_vhci_hcd(hcd);
+
+	kfree(private->vdev);
+	kfree(private->port_status);
+	usb_put_hcd(hcd);
+}
+
+int vhci_prepare_hcds(struct vhci *vhci, unsigned int ports)
+{
+	struct usb_hcd *hcd_hs, *hcd_ss;
+
+	hcd_hs = vhci_alloc_hcd(vhci->pdev, NULL, ports);
+	if (!hcd_hs)
+		return dev_err_probe(&vhci->pdev->dev, -ENOMEM,
+				     "create primary hcd failed\n");
+	hcd_ss = vhci_alloc_hcd(vhci->pdev, hcd_hs, ports);
+	if (!hcd_ss) {
+		vhci_put_hcd(hcd_hs);
+		return dev_err_probe(&vhci->pdev->dev, -ENOMEM,
+				     "create shared hcd failed\n");
+	}
+	vhci->vhci_hcd_hs = hcd_to_vhci_hcd(hcd_hs);
+	vhci->vhci_hcd_ss = hcd_to_vhci_hcd(hcd_ss);
+	return 0;
+}
+
+void vhci_release_hcds(struct vhci *vhci)
+{
+	if (vhci->vhci_hcd_ss)
+		vhci_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_ss));
+	if (vhci->vhci_hcd_hs)
+		vhci_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
+	vhci->vhci_hcd_hs = NULL;
+	vhci->vhci_hcd_ss = NULL;
+}
+
 static int vhci_hcd_probe(struct platform_device *pdev)
 {
 	struct vhci             *vhci = *((void **)dev_get_platdata(&pdev->dev));
@@ -1346,42 +1412,35 @@ static int vhci_hcd_probe(struct platform_device *pdev)
 
 	usbip_dbg_vhci_hc("name %s id %d\n", pdev->name, pdev->id);
 
-	/* Publish the device pointer before making the controller ready. */
-	vhci->pdev = pdev;
-
 	/*
-	 * Allocate and initialize hcd.
-	 * Our private data is also allocated automatically.
+	 * Initial probe uses the HCD pair prepared with the pool. Unbind
+	 * releases both HCDs and clears their pointers, so rebind needs
+	 * another pair. Preparation installs pointers only as a pair.
 	 */
-	hcd_hs = usb_create_hcd(&vhci_hc_driver, &pdev->dev, dev_name(&pdev->dev));
-	if (!hcd_hs) {
-		vhci->probe_error = -ENOMEM;
-		return dev_err_probe(&pdev->dev, -ENOMEM, "create primary hcd failed\n");
+	if (!vhci->vhci_hcd_hs) {
+		ret = vhci_prepare_hcds(vhci, vhci_hc_ports);
+		if (ret) {
+			vhci->probe_error = ret;
+			return ret;
+		}
 	}
-
+	hcd_hs = vhci_hcd_to_hcd(vhci->vhci_hcd_hs);
+	hcd_ss = vhci_hcd_to_hcd(vhci->vhci_hcd_ss);
+	/* The device name is available now that the controller is registered. */
+	hcd_hs->self.bus_name = dev_name(&pdev->dev);
+	hcd_ss->self.bus_name = dev_name(&pdev->dev);
 	hcd_hs->has_tt = 1;
 
-	/*
-	 * Finish generic HCD structure initialization and register.
-	 * Call the driver's reset() and start() routines.
-	 */
 	ret = usb_add_hcd(hcd_hs, 0, 0);
 	if (ret) {
 		dev_err_probe(&pdev->dev, ret, "usb_add_hcd hs failed\n");
-		goto put_usb2_hcd;
+		goto release_hcds;
 	}
-
-	hcd_ss = usb_create_shared_hcd(&vhci_hc_driver, &pdev->dev,
-				       dev_name(&pdev->dev), hcd_hs);
-	if (!hcd_ss) {
-		ret = dev_err_probe(&pdev->dev, -ENOMEM, "create shared hcd failed\n");
-		goto remove_usb2_hcd;
-	}
-
 	ret = usb_add_hcd(hcd_ss, 0, 0);
 	if (ret) {
 		dev_err_probe(&pdev->dev, ret, "usb_add_hcd ss failed\n");
-		goto put_usb3_hcd;
+		usb_remove_hcd(hcd_hs);
+		goto release_hcds;
 	}
 
 	usbip_dbg_vhci_hc("bye\n");
@@ -1389,14 +1448,8 @@ static int vhci_hcd_probe(struct platform_device *pdev)
 	vhci_set_ready(vhci, true);
 	return 0;
 
-put_usb3_hcd:
-	usb_put_hcd(hcd_ss);
-remove_usb2_hcd:
-	usb_remove_hcd(hcd_hs);
-put_usb2_hcd:
-	usb_put_hcd(hcd_hs);
-	vhci->vhci_hcd_hs = NULL;
-	vhci->vhci_hcd_ss = NULL;
+release_hcds:
+	vhci_release_hcds(vhci);
 	vhci->probe_error = ret;
 	return ret;
 }
@@ -1413,10 +1466,10 @@ static void vhci_hcd_remove(struct platform_device *pdev)
 	 * invoking the HCD's stop() methods.
 	 */
 	usb_remove_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_ss));
-	usb_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_ss));
+	vhci_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_ss));
 
 	usb_remove_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
-	usb_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
+	vhci_put_hcd(vhci_hcd_to_hcd(vhci->vhci_hcd_hs));
 
 	vhci->vhci_hcd_hs = NULL;
 	vhci->vhci_hcd_ss = NULL;
@@ -1444,7 +1497,7 @@ static int vhci_hcd_suspend(struct platform_device *pdev, pm_message_t state)
 
 	spin_lock_irqsave(&vhci->lock, flags);
 
-	for (rhport = 0; rhport < VHCI_HC_PORTS; rhport++) {
+	for (rhport = 0; rhport < vhci_hc_ports; rhport++) {
 		if (vhci->vhci_hcd_hs->port_status[rhport] &
 		    USB_PORT_STAT_CONNECTION)
 			connected += 1;
@@ -1491,7 +1544,14 @@ static int vhci_hcd_resume(struct platform_device *pdev)
 
 #endif
 
+static const struct platform_device_id vhci_device_ids[] = {
+	{ "vhci_hcd" },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, vhci_device_ids);
+
 static struct platform_driver vhci_driver = {
+	.id_table = vhci_device_ids,
 	.probe	= vhci_hcd_probe,
 	.remove = vhci_hcd_remove,
 	.suspend = vhci_hcd_suspend,
@@ -1511,7 +1571,6 @@ static int __init vhci_hcd_init(void)
 	ret = platform_driver_register(&vhci_driver);
 	if (ret)
 		return ret;
-
 	ret = vhci_manager_start();
 	if (ret)
 		goto unregister_driver;

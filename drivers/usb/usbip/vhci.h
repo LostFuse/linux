@@ -18,6 +18,7 @@
 #include <linux/wait.h>
 
 struct vhci_device {
+	struct vhci_hcd *hcd;
 	struct usb_device *udev;
 
 	/*
@@ -80,8 +81,8 @@ enum hub_speed {
 #define VHCI_HC_PORTS 8
 #endif
 
-/* Each VHCI has 2 hubs (USB2 and USB3), each has VHCI_HC_PORTS ports */
-#define VHCI_PORTS	(VHCI_HC_PORTS*2)
+/* Each live VHCI has 2 hubs (USB2 and USB3) with vhci_hc_ports each. */
+#define VHCI_PORTS	(vhci_hc_ports * 2)
 
 #ifdef CONFIG_USBIP_VHCI_NR_HCS
 #define VHCI_NR_HCS CONFIG_USBIP_VHCI_NR_HCS
@@ -95,6 +96,7 @@ struct vhci {
 	spinlock_t lock;
 
 	unsigned int id;
+	bool registered;
 	bool ready;
 	int probe_error;
 	struct platform_device *pdev;
@@ -107,7 +109,7 @@ struct vhci {
 struct vhci_hcd {
 	struct vhci *vhci;
 
-	u32 port_status[VHCI_HC_PORTS];
+	u32 *port_status;
 
 	unsigned resuming:1;
 	unsigned long re_timeout;
@@ -119,10 +121,12 @@ struct vhci_hcd {
 	 * wIndex shows the port number and begins from 1.
 	 * But, the index of this array begins from 0.
 	 */
-	struct vhci_device vdev[VHCI_HC_PORTS];
+	struct vhci_device *vdev;
 };
 
 unsigned int vhci_get_controller_count(void);
+/* Shared geometry stays fixed until all HCDs using it have been removed. */
+extern unsigned int vhci_hc_ports;
 /*
  * Protects the published pool and controller readiness. Lookup callers must
  * hold the read lock while using the returned controller or its HCDs, before
@@ -140,6 +144,8 @@ void vhci_manager_stop(void);
 extern struct attribute_group vhci_attr_group;
 
 /* vhci_hcd.c */
+int vhci_prepare_hcds(struct vhci *vhci, unsigned int ports);
+void vhci_release_hcds(struct vhci *vhci);
 void rh_port_connect(struct vhci_device *vdev, enum usb_device_speed speed);
 
 /* vhci_sysfs.c */
@@ -152,16 +158,6 @@ int vhci_rx_loop(void *data);
 
 /* vhci_tx.c */
 int vhci_tx_loop(void *data);
-
-static inline __u32 port_to_rhport(__u32 port)
-{
-	return port % VHCI_HC_PORTS;
-}
-
-static inline int port_to_pdev_nr(__u32 port)
-{
-	return port / VHCI_PORTS;
-}
 
 static inline struct vhci_hcd *hcd_to_vhci_hcd(struct usb_hcd *hcd)
 {
@@ -185,7 +181,7 @@ static inline struct usb_hcd *vhci_hcd_to_hcd(struct vhci_hcd *vhci_hcd)
 
 static inline struct vhci_hcd *vdev_to_vhci_hcd(struct vhci_device *vdev)
 {
-	return container_of((void *)(vdev - vdev->rhport), struct vhci_hcd, vdev);
+	return vdev->hcd;
 }
 
 #endif /* __USBIP_VHCI_H */
